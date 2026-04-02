@@ -1,6 +1,8 @@
 const std = @import("std");
 const kilo_zig = @import("kilo_zig");
 
+const KILO_ZIG_VERSION = "0.0.1";
+
 fn disableRawMode(original_termios: std.posix.termios) !void {
     try std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, original_termios);
 }
@@ -64,7 +66,7 @@ fn getCursorPosition() !std.posix.winsize {
     std.debug.print("\r\nbuf[1] = {c}\r\n", .{buf[1]});
 
     // if (buf[0] != '\x1b' || buf[1] != '[') return -1;
-//   if (sscanf(&buf[2], "%d;%d", rows, cols) != 2) return -1;
+    //   if (sscanf(&buf[2], "%d;%d", rows, cols) != 2) return -1;
 
     if (buf[0] != '\x1b' or buf[1] != '[') {
         std.debug.print("Unexpected response format: {s}\r\n", .{buf[0..i]});
@@ -158,8 +160,21 @@ const AppendBuffer = struct {
 
 fn editorDrawRows(ab: *AppendBuffer, editorConfig: EditorConfig) !void {
     for (0..editorConfig.screenRows) |y| {
-        try ab.append("~");
+        if (y == editorConfig.screenRows / 3) {
+            const welcome = "Kilo Zig -- version " ++ KILO_ZIG_VERSION;
+            const padding = (editorConfig.screenCols - welcome.len) / 2;
+            if (padding > 0) {
+                try ab.append("~");
+                for (0..padding - 1) |_| {
+                    try ab.append(" ");
+                }
+            }
+            try ab.append(welcome);
+        } else {
+            try ab.append("~");
+        }
 
+        try ab.append("\x1b[K");
         if (y < editorConfig.screenRows - 1) {
             try ab.append("\r\n");
         }
@@ -171,12 +186,13 @@ fn editorRefreshScreen(editorConfig: EditorConfig) !void {
     defer ab.deinit();
 
     // Build the full frame in memory first, then write it in one shot.
-    try ab.append("\x1b[2J");
+    try ab.append("\x1b[?25l");
     try ab.append("\x1b[H");
 
     try editorDrawRows(&ab, editorConfig);
 
     try ab.append("\x1b[H");
+    try ab.append("\x1b[?25h");
     _ = try std.posix.write(std.posix.STDOUT_FILENO, ab.items());
 }
 
