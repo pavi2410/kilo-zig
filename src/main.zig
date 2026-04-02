@@ -132,25 +132,52 @@ fn getWindowSize() !std.posix.winsize {
     }
 }
 
-fn editorDrawRows(editorConfig: EditorConfig) !void {
+const AppendBuffer = struct {
+    buffer: std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+
+    fn init(allocator: std.mem.Allocator) AppendBuffer {
+        return .{
+            .buffer = .empty,
+            .allocator = allocator,
+        };
+    }
+
+    fn deinit(self: *AppendBuffer) void {
+        self.buffer.deinit(self.allocator);
+    }
+
+    fn append(self: *AppendBuffer, slice: []const u8) !void {
+        try self.buffer.appendSlice(self.allocator, slice);
+    }
+
+    fn items(self: *const AppendBuffer) []const u8 {
+        return self.buffer.items;
+    }
+};
+
+fn editorDrawRows(ab: *AppendBuffer, editorConfig: EditorConfig) !void {
     for (0..editorConfig.screenRows) |y| {
-        std.debug.print("~", .{});
+        try ab.append("~");
 
         if (y < editorConfig.screenRows - 1) {
-            std.debug.print("\r\n", .{});
+            try ab.append("\r\n");
         }
     }
 }
 
 fn editorRefreshScreen(editorConfig: EditorConfig) !void {
-    // Clear the screen and move the cursor to the top-left corner
-    std.debug.print("\x1b[2J\x1b[H", .{});
+    var ab = AppendBuffer.init(std.heap.page_allocator);
+    defer ab.deinit();
 
-    editorDrawRows(editorConfig) catch {
-        std.log.err("Error drawing rows.", .{});
-    };
+    // Build the full frame in memory first, then write it in one shot.
+    try ab.append("\x1b[2J");
+    try ab.append("\x1b[H");
 
-    std.debug.print("\x1b[H", .{});
+    try editorDrawRows(&ab, editorConfig);
+
+    try ab.append("\x1b[H");
+    _ = try std.posix.write(std.posix.STDOUT_FILENO, ab.items());
 }
 
 fn editorProcessKeypress() !void {
