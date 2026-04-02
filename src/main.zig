@@ -229,15 +229,17 @@ const EditorRow = struct {
 };
 
 const Editor = struct {
+    allocator: std.mem.Allocator,
     cx: usize = 0,
     cy: usize = 0,
     screenRows: usize = 24,
     screenCols: usize = 80,
     rows: std.ArrayList(EditorRow),
 
-    fn init() !Editor {
+    fn init(allocator: std.mem.Allocator) !Editor {
         const ws = try getWindowSize();
         return .{
+            .allocator = allocator,
             .cx = 0,
             .cy = 0,
             .screenRows = ws.row,
@@ -247,9 +249,9 @@ const Editor = struct {
     }
 
     fn appendRow(self: *Editor, line: []const u8) !void {
-        const chars = try std.heap.page_allocator.alloc(u8, line.len);
+        const chars = try self.allocator.alloc(u8, line.len);
         @memcpy(chars, line);
-        try self.rows.append(std.heap.page_allocator, .{
+        try self.rows.append(self.allocator, .{
             .chars = chars,
         });
     }
@@ -260,8 +262,8 @@ const Editor = struct {
         defer file.close();
 
         const stat = try file.stat();
-        const contents = try file.readToEndAlloc(std.heap.page_allocator, stat.size);
-        defer std.heap.page_allocator.free(contents);
+        const contents = try file.readToEndAlloc(self.allocator, stat.size);
+        defer self.allocator.free(contents);
 
         var lines = std.mem.splitScalar(u8, contents, '\n');
         while (lines.next()) |line| {
@@ -302,7 +304,7 @@ const Editor = struct {
     }
 
     fn refreshScreen(self: *const Editor) !void {
-        var ab = AppendBuffer.init(std.heap.page_allocator);
+        var ab = AppendBuffer.init(self.allocator);
         defer ab.deinit();
 
         // Build the full frame in memory first, then write it in one shot.
@@ -378,7 +380,7 @@ pub fn main() !void {
 
     _ = args.skip();
 
-    var editor = try Editor.init();
+    var editor = try Editor.init(std.heap.page_allocator);
     if (args.next()) |filename| {
         try editor.open(filename);
     }
