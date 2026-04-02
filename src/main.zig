@@ -36,7 +36,7 @@ fn ctrlKey(k: u8) u8 {
     return k & 0x1f;
 }
 
-fn editorReadKey() !?u8 {
+fn editorReadByte() !?u8 {
     var stdin = std.fs.File.stdin();
     var c: [1]u8 = undefined;
     const bytes_read = try stdin.read(&c);
@@ -44,6 +44,36 @@ fn editorReadKey() !?u8 {
         return null;
     }
     return c[0];
+}
+
+const EditorKey = union(enum) {
+    byte: u8,
+    arrow_left,
+    arrow_right,
+    arrow_up,
+    arrow_down,
+};
+
+fn editorReadKey() !?EditorKey {
+    const first = (try editorReadByte()) orelse return null;
+    if (first != '\x1b') {
+        return .{ .byte = first };
+    }
+
+    const second = (try editorReadByte()) orelse return .{ .byte = first };
+    const third = (try editorReadByte()) orelse return .{ .byte = first };
+
+    if (second == '[') {
+        return switch (third) {
+            'A' => .arrow_up,
+            'B' => .arrow_down,
+            'C' => .arrow_right,
+            'D' => .arrow_left,
+            else => .{ .byte = first },
+        };
+    }
+
+    return .{ .byte = first };
 }
 
 fn getCursorPosition() !std.posix.winsize {
@@ -55,7 +85,7 @@ fn getCursorPosition() !std.posix.winsize {
     var buf: [32]u8 = undefined;
     var i: usize = 0;
     while (i < buf.len - 1) {
-        const c = (try editorReadKey()) orelse continue;
+        const c = (try editorReadByte()) orelse continue;
         if (c == 'R') break;
         buf[i] = c;
         i += 1;
@@ -215,18 +245,18 @@ const Editor = struct {
         _ = try std.posix.write(std.posix.STDOUT_FILENO, ab.items());
     }
 
-    fn moveCursor(self: *Editor, key: u8) void {
+    fn moveCursor(self: *Editor, key: EditorKey) void {
         switch (key) {
-            'a' => {
+            .arrow_left => {
                 if (self.cx != 0) self.cx -= 1;
             },
-            'd' => {
+            .arrow_right => {
                 if (self.cx != self.screenCols - 1) self.cx += 1;
             },
-            'w' => {
+            .arrow_up => {
                 if (self.cy != 0) self.cy -= 1;
             },
-            's' => {
+            .arrow_down => {
                 if (self.cy != self.screenRows - 1) self.cy += 1;
             },
             else => {},
@@ -234,13 +264,14 @@ const Editor = struct {
     }
 
     fn processKeypress(self: *Editor) !bool {
-        const c = (try editorReadKey()) orelse return true;
-        if (c == ctrlKey('q')) {
-            return false;
-        }
-
-        if (c == 'w' or c == 'a' or c == 's' or c == 'd') {
-            self.moveCursor(c);
+        const key = (try editorReadKey()) orelse return true;
+        switch (key) {
+            .byte => |c| {
+                if (c == ctrlKey('q')) {
+                    return false;
+                }
+            },
+            .arrow_left, .arrow_right, .arrow_up, .arrow_down => self.moveCursor(key),
         }
 
         return true;
