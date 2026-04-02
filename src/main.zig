@@ -237,6 +237,7 @@ const EditorRow = struct {
 const Editor = struct {
     allocator: std.mem.Allocator,
     filename: ?[]u8 = null,
+    statusMessage: ?[]u8 = null,
     cx: usize = 0,
     cy: usize = 0,
     rx: usize = 0,
@@ -251,12 +252,13 @@ const Editor = struct {
         return .{
             .allocator = allocator,
             .filename = null,
+            .statusMessage = null,
             .cx = 0,
             .cy = 0,
             .rx = 0,
             .rowOff = 0,
             .colOff = 0,
-            .screenRows = ws.row - 1,
+            .screenRows = ws.row - 2,
             .screenCols = ws.col,
             .rows = .empty,
         };
@@ -265,6 +267,9 @@ const Editor = struct {
     fn deinit(self: *Editor) void {
         if (self.filename) |filename| {
             self.allocator.free(filename);
+        }
+        if (self.statusMessage) |status_message| {
+            self.allocator.free(status_message);
         }
         for (self.rows.items) |row| {
             self.allocator.free(row.chars);
@@ -342,6 +347,13 @@ const Editor = struct {
         }
     }
 
+    fn setStatusMessage(self: *Editor, message: []const u8) !void {
+        if (self.statusMessage) |status_message| {
+            self.allocator.free(status_message);
+        }
+        self.statusMessage = try self.allocator.dupe(u8, message);
+    }
+
     fn drawStatusBar(self: *const Editor, ab: *AppendBuffer) !void {
         try ab.append("\x1b[7m");
 
@@ -370,6 +382,14 @@ const Editor = struct {
         }
 
         try ab.append("\x1b[m");
+    }
+
+    fn drawMessageBar(self: *const Editor, ab: *AppendBuffer) !void {
+        try ab.append("\x1b[K");
+        if (self.statusMessage) |status_message| {
+            const len = @min(status_message.len, self.screenCols);
+            try ab.append(status_message[0..len]);
+        }
     }
 
     fn drawRows(self: *const Editor, ab: *AppendBuffer) !void {
@@ -438,6 +458,8 @@ const Editor = struct {
         try self.drawRows(&ab);
         try ab.append("\r\n");
         try self.drawStatusBar(&ab);
+        try ab.append("\r\n");
+        try self.drawMessageBar(&ab);
 
         try ab.appendFmt("\x1b[{d};{d}H", .{ (self.cy - self.rowOff) + 1, (self.rx - self.colOff) + 1 });
         try ab.append("\x1b[?25h");
@@ -529,6 +551,7 @@ pub fn main() !void {
 
     var editor = try Editor.init(std.heap.page_allocator);
     defer editor.deinit();
+    try editor.setStatusMessage("HELP: Ctrl-Q = quit");
     if (args.next()) |filename| {
         try editor.open(filename);
     }
