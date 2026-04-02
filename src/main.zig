@@ -52,6 +52,11 @@ const EditorKey = union(enum) {
     arrow_right,
     arrow_up,
     arrow_down,
+    page_up,
+    page_down,
+    home,
+    end,
+    delete,
 };
 
 fn editorReadKey() !?EditorKey {
@@ -64,11 +69,35 @@ fn editorReadKey() !?EditorKey {
     const third = (try editorReadByte()) orelse return .{ .byte = first };
 
     if (second == '[') {
+        if (third >= '0' and third <= '9') {
+            const fourth = (try editorReadByte()) orelse return .{ .byte = first };
+            if (fourth == '~') {
+                return switch (third) {
+                    '3' => .delete,
+                    '5' => .page_up,
+                    '6' => .page_down,
+                    '1', '7' => .home,
+                    '4', '8' => .end,
+                    else => .{ .byte = first },
+                };
+            }
+        }
+
         return switch (third) {
             'A' => .arrow_up,
             'B' => .arrow_down,
             'C' => .arrow_right,
             'D' => .arrow_left,
+            'H' => .home,
+            'F' => .end,
+            else => .{ .byte = first },
+        };
+    }
+
+    if (second == 'O') {
+        return switch (third) {
+            'H' => .home,
+            'F' => .end,
             else => .{ .byte = first },
         };
     }
@@ -272,6 +301,21 @@ const Editor = struct {
                 }
             },
             .arrow_left, .arrow_right, .arrow_up, .arrow_down => self.moveCursor(key),
+            .page_up => {
+                self.cy = 0;
+                for (0..self.screenRows) |_| {
+                    self.moveCursor(.arrow_up);
+                }
+            },
+            .page_down => {
+                self.cy = self.screenRows - 1;
+                for (0..self.screenRows) |_| {
+                    self.moveCursor(.arrow_down);
+                }
+            },
+            .home => self.cx = 0,
+            .end => self.cx = self.screenCols - 1,
+            .delete => {},
         }
 
         return true;
