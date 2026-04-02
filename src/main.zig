@@ -232,6 +232,7 @@ const Editor = struct {
     allocator: std.mem.Allocator,
     cx: usize = 0,
     cy: usize = 0,
+    rowOff: usize = 0,
     screenRows: usize = 24,
     screenCols: usize = 80,
     rows: std.ArrayList(EditorRow),
@@ -242,6 +243,7 @@ const Editor = struct {
             .allocator = allocator,
             .cx = 0,
             .cy = 0,
+            .rowOff = 0,
             .screenRows = ws.row,
             .screenCols = ws.col,
             .rows = .empty,
@@ -278,8 +280,9 @@ const Editor = struct {
 
     fn drawRows(self: *const Editor, ab: *AppendBuffer) !void {
         for (0..self.screenRows) |y| {
-            if (y < self.rows.items.len) {
-                const row = self.rows.items[y];
+            const fileRow = y + self.rowOff;
+            if (fileRow < self.rows.items.len) {
+                const row = self.rows.items[fileRow];
                 const len = @min(row.len(), self.screenCols);
                 try ab.append(row.chars[0..len]);
             } else if (y == self.screenRows / 3) {
@@ -303,7 +306,19 @@ const Editor = struct {
         }
     }
 
-    fn refreshScreen(self: *const Editor) !void {
+    fn scroll(self: *Editor) void {
+        if (self.cy < self.rowOff) {
+            self.rowOff = self.cy;
+        }
+
+        if (self.cy >= self.rowOff + self.screenRows) {
+            self.rowOff = self.cy - self.screenRows + 1;
+        }
+    }
+
+    fn refreshScreen(self: *Editor) !void {
+        self.scroll();
+
         var ab = AppendBuffer.init(self.allocator);
         defer ab.deinit();
 
@@ -313,7 +328,7 @@ const Editor = struct {
 
         try self.drawRows(&ab);
 
-        try ab.appendFmt("\x1b[{d};{d}H", .{ self.cy + 1, self.cx + 1 });
+        try ab.appendFmt("\x1b[{d};{d}H", .{ (self.cy - self.rowOff) + 1, self.cx + 1 });
         try ab.append("\x1b[?25h");
         _ = try std.posix.write(std.posix.STDOUT_FILENO, ab.items());
     }
@@ -330,7 +345,7 @@ const Editor = struct {
                 if (self.cy != 0) self.cy -= 1;
             },
             .arrow_down => {
-                if (self.cy != self.screenRows - 1) self.cy += 1;
+                if (self.cy < self.rows.items.len) self.cy += 1;
             },
             else => {},
         }
