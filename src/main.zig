@@ -236,6 +236,7 @@ const EditorRow = struct {
 
 const Editor = struct {
     allocator: std.mem.Allocator,
+    filename: ?[]u8 = null,
     cx: usize = 0,
     cy: usize = 0,
     rx: usize = 0,
@@ -249,18 +250,22 @@ const Editor = struct {
         const ws = try getWindowSize();
         return .{
             .allocator = allocator,
+            .filename = null,
             .cx = 0,
             .cy = 0,
             .rx = 0,
             .rowOff = 0,
             .colOff = 0,
-            .screenRows = ws.row,
+            .screenRows = ws.row - 1,
             .screenCols = ws.col,
             .rows = .empty,
         };
     }
 
     fn deinit(self: *Editor) void {
+        if (self.filename) |filename| {
+            self.allocator.free(filename);
+        }
         for (self.rows.items) |row| {
             self.allocator.free(row.chars);
             self.allocator.free(row.render);
@@ -316,6 +321,8 @@ const Editor = struct {
     }
 
     fn open(self: *Editor, filename: []const u8) !void {
+        self.filename = try self.allocator.dupe(u8, filename);
+
         const cwd = std.fs.cwd();
         const file = try cwd.openFile(filename, .{});
         defer file.close();
@@ -333,6 +340,36 @@ const Editor = struct {
 
             try self.appendRow(line_slice);
         }
+    }
+
+    fn drawStatusBar(self: *const Editor, ab: *AppendBuffer) !void {
+        try ab.append("\x1b[7m");
+
+        var status_buf: [80]u8 = undefined;
+        const filename = self.filename orelse "[No Name]";
+        const status = try std.fmt.bufPrint(
+            &status_buf,
+            "{s} - {d} lines",
+            .{ filename[0..@min(filename.len, 20)], self.rows.items.len },
+        );
+
+        var rstatus_buf: [80]u8 = undefined;
+        const rstatus = try std.fmt.bufPrint(&rstatus_buf, "{d}/{d}", .{ self.cy + 1, self.rows.items.len });
+
+        var len: usize = @min(status.len, self.screenCols);
+        try ab.append(status[0..len]);
+
+        while (len < self.screenCols) {
+            if (self.screenCols - len == rstatus.len) {
+                try ab.append(rstatus);
+                break;
+            }
+
+            try ab.append(" ");
+            len += 1;
+        }
+
+        try ab.append("\x1b[m");
     }
 
     fn drawRows(self: *const Editor, ab: *AppendBuffer) !void {
@@ -399,6 +436,8 @@ const Editor = struct {
         try ab.append("\x1b[H");
 
         try self.drawRows(&ab);
+        try ab.append("\r\n");
+        try self.drawStatusBar(&ab);
 
         try ab.appendFmt("\x1b[{d};{d}H", .{ (self.cy - self.rowOff) + 1, (self.rx - self.colOff) + 1 });
         try ab.append("\x1b[?25h");
