@@ -233,6 +233,7 @@ const Editor = struct {
     cx: usize = 0,
     cy: usize = 0,
     rowOff: usize = 0,
+    colOff: usize = 0,
     screenRows: usize = 24,
     screenCols: usize = 80,
     rows: std.ArrayList(EditorRow),
@@ -244,6 +245,7 @@ const Editor = struct {
             .cx = 0,
             .cy = 0,
             .rowOff = 0,
+            .colOff = 0,
             .screenRows = ws.row,
             .screenCols = ws.col,
             .rows = .empty,
@@ -283,8 +285,10 @@ const Editor = struct {
             const fileRow = y + self.rowOff;
             if (fileRow < self.rows.items.len) {
                 const row = self.rows.items[fileRow];
-                const len = @min(row.len(), self.screenCols);
-                try ab.append(row.chars[0..len]);
+                if (self.colOff < row.len()) {
+                    const len = @min(row.len() - self.colOff, self.screenCols);
+                    try ab.append(row.chars[self.colOff .. self.colOff + len]);
+                }
             } else if (y == self.screenRows / 3) {
                 const welcome = "Kilo Zig -- version " ++ KILO_ZIG_VERSION;
                 const padding = (self.screenCols - welcome.len) / 2;
@@ -314,6 +318,14 @@ const Editor = struct {
         if (self.cy >= self.rowOff + self.screenRows) {
             self.rowOff = self.cy - self.screenRows + 1;
         }
+
+        if (self.cx < self.colOff) {
+            self.colOff = self.cx;
+        }
+
+        if (self.cx >= self.colOff + self.screenCols) {
+            self.colOff = self.cx - self.screenCols + 1;
+        }
     }
 
     fn refreshScreen(self: *Editor) !void {
@@ -328,7 +340,7 @@ const Editor = struct {
 
         try self.drawRows(&ab);
 
-        try ab.appendFmt("\x1b[{d};{d}H", .{ (self.cy - self.rowOff) + 1, self.cx + 1 });
+        try ab.appendFmt("\x1b[{d};{d}H", .{ (self.cy - self.rowOff) + 1, (self.cx - self.colOff) + 1 });
         try ab.append("\x1b[?25h");
         _ = try std.posix.write(std.posix.STDOUT_FILENO, ab.items());
     }
