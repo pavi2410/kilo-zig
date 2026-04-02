@@ -252,6 +252,13 @@ const Editor = struct {
         };
     }
 
+    fn deinit(self: *Editor) void {
+        for (self.rows.items) |row| {
+            self.allocator.free(row.chars);
+        }
+        self.rows.deinit(self.allocator);
+    }
+
     fn appendRow(self: *Editor, line: []const u8) !void {
         const chars = try self.allocator.alloc(u8, line.len);
         @memcpy(chars, line);
@@ -429,6 +436,7 @@ pub fn main() !void {
     _ = args.skip();
 
     var editor = try Editor.init(std.heap.page_allocator);
+    defer editor.deinit();
     if (args.next()) |filename| {
         try editor.open(filename);
     }
