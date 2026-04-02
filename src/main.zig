@@ -454,7 +454,7 @@ const Editor = struct {
             },
             .arrow_left, .arrow_right, .arrow_up, .arrow_down => self.moveCursor(key),
             .page_up => {
-                self.cy = 0;
+                self.cy = self.rowOff;
                 for (0..self.screenRows) |_| {
                     self.moveCursor(.arrow_up);
                 }
