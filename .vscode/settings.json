@@ -2,5 +2,9 @@
     "bun.runtime": "/Users/pavi2410/.local/share/mise/shims/bun",
     "debug.javascript.defaultRuntimeExecutable": {
         "pwa-node": "/Users/pavi2410/.local/share/mise/shims/node"
-    }
+    },
+    "zig.path": "/Users/pavi2410/.local/share/mise/installs/zig/0.15.2/bin/zig",
+    "terminal.integrated.commandsToSkipShell": [
+        "-workbench.action.quickOpenView"
+    ]
 }
