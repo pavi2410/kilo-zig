@@ -36,13 +36,12 @@ fn ctrlKey(k: u8) u8 {
     return k & 0x1f;
 }
 
-fn editorReadKey() !u8 {
+fn editorReadKey() !?u8 {
     var stdin = std.fs.File.stdin();
     var c: [1]u8 = undefined;
     const bytes_read = try stdin.read(&c);
     if (bytes_read == 0) {
-        std.debug.print("End of input.\r\n", .{});
-        return 0;
+        return null;
     }
     return c[0];
 }
@@ -56,7 +55,7 @@ fn getCursorPosition() !std.posix.winsize {
     var buf: [32]u8 = undefined;
     var i: usize = 0;
     while (i < buf.len - 1) {
-        const c = try editorReadKey();
+        const c = (try editorReadKey()) orelse continue;
         if (c == 'R') break;
         buf[i] = c;
         i += 1;
@@ -158,66 +157,65 @@ const AppendBuffer = struct {
     }
 };
 
-fn editorDrawRows(ab: *AppendBuffer, editorConfig: EditorConfig) !void {
-    for (0..editorConfig.screenRows) |y| {
-        if (y == editorConfig.screenRows / 3) {
-            const welcome = "Kilo Zig -- version " ++ KILO_ZIG_VERSION;
-            const padding = (editorConfig.screenCols - welcome.len) / 2;
-            if (padding > 0) {
-                try ab.append("~");
-                for (0..padding - 1) |_| {
-                    try ab.append(" ");
-                }
-            }
-            try ab.append(welcome);
-        } else {
-            try ab.append("~");
-        }
-
-        try ab.append("\x1b[K");
-        if (y < editorConfig.screenRows - 1) {
-            try ab.append("\r\n");
-        }
-    }
-}
-
-fn editorRefreshScreen(editorConfig: EditorConfig) !void {
-    var ab = AppendBuffer.init(std.heap.page_allocator);
-    defer ab.deinit();
-
-    // Build the full frame in memory first, then write it in one shot.
-    try ab.append("\x1b[?25l");
-    try ab.append("\x1b[H");
-
-    try editorDrawRows(&ab, editorConfig);
-
-    try ab.append("\x1b[H");
-    try ab.append("\x1b[?25h");
-    _ = try std.posix.write(std.posix.STDOUT_FILENO, ab.items());
-}
-
-fn editorProcessKeypress() !void {
-    const c = try editorReadKey();
-    if (c == ctrlKey('q')) {
-        std.debug.print("Exiting...\r\n", .{});
-        std.posix.exit(0);
-    }
-}
-
-const EditorConfig = struct {
+const Editor = struct {
     screenRows: usize = 24,
     screenCols: usize = 80,
-    origTermios: std.posix.termios,
-};
 
-fn initEditor() !EditorConfig {
-    const ws = try getWindowSize();
-    return EditorConfig{
-        .screenRows = ws.row,
-        .screenCols = ws.col,
-        .origTermios = undefined, // This will be set in main after enabling raw mode
-    };
-}
+    fn init() !Editor {
+        const ws = try getWindowSize();
+        return .{
+            .screenRows = ws.row,
+            .screenCols = ws.col,
+        };
+    }
+
+    fn drawRows(self: *const Editor, ab: *AppendBuffer) !void {
+        for (0..self.screenRows) |y| {
+            if (y == self.screenRows / 3) {
+            const welcome = "Kilo Zig -- version " ++ KILO_ZIG_VERSION;
+                const padding = (self.screenCols - welcome.len) / 2;
+            if (padding > 0) {
+                    try ab.append("~");
+                    for (0..padding - 1) |_| {
+                        try ab.append(" ");
+                    }
+                }
+                try ab.append(welcome);
+            } else {
+                try ab.append("~");
+            }
+
+            try ab.append("\x1b[K");
+            if (y < self.screenRows - 1) {
+                try ab.append("\r\n");
+            }
+        }
+    }
+
+    fn refreshScreen(self: *const Editor) !void {
+        var ab = AppendBuffer.init(std.heap.page_allocator);
+        defer ab.deinit();
+
+        // Build the full frame in memory first, then write it in one shot.
+        try ab.append("\x1b[?25l");
+        try ab.append("\x1b[H");
+
+        try self.drawRows(&ab);
+
+        try ab.append("\x1b[H");
+        try ab.append("\x1b[?25h");
+        _ = try std.posix.write(std.posix.STDOUT_FILENO, ab.items());
+    }
+
+    fn processKeypress(_: *Editor) !bool {
+        const c = (try editorReadKey()) orelse return true;
+        if (c == ctrlKey('q')) {
+            return false;
+        }
+
+        return true;
+    }
+};
 
 pub fn main() !void {
     const original_termios = enableRawMode() catch {
@@ -228,18 +226,18 @@ pub fn main() !void {
         std.log.err("Failed to disable raw mode.", .{});
     };
 
-    var editorConfig = try initEditor();
-    editorConfig.origTermios = original_termios;
+    var editor = try Editor.init();
 
     while (true) {
-        editorRefreshScreen(editorConfig) catch {
+        editor.refreshScreen() catch {
             std.log.err("Error refreshing screen.", .{});
             break;
         };
-        editorProcessKeypress() catch {
+        const should_continue = editor.processKeypress() catch {
             std.log.err("Error processing keypress.", .{});
             break;
         };
+        if (!should_continue) break;
     }
 
     // Prints to stderr, ignoring potential errors.
