@@ -152,18 +152,26 @@ const AppendBuffer = struct {
         try self.buffer.appendSlice(self.allocator, slice);
     }
 
+    fn appendFmt(self: *AppendBuffer, comptime fmt: []const u8, args: anytype) !void {
+        try self.buffer.writer(self.allocator).print(fmt, args);
+    }
+
     fn items(self: *const AppendBuffer) []const u8 {
         return self.buffer.items;
     }
 };
 
 const Editor = struct {
+    cx: usize = 0,
+    cy: usize = 0,
     screenRows: usize = 24,
     screenCols: usize = 80,
 
     fn init() !Editor {
         const ws = try getWindowSize();
         return .{
+            .cx = 0,
+            .cy = 0,
             .screenRows = ws.row,
             .screenCols = ws.col,
         };
@@ -172,9 +180,9 @@ const Editor = struct {
     fn drawRows(self: *const Editor, ab: *AppendBuffer) !void {
         for (0..self.screenRows) |y| {
             if (y == self.screenRows / 3) {
-            const welcome = "Kilo Zig -- version " ++ KILO_ZIG_VERSION;
+                const welcome = "Kilo Zig -- version " ++ KILO_ZIG_VERSION;
                 const padding = (self.screenCols - welcome.len) / 2;
-            if (padding > 0) {
+                if (padding > 0) {
                     try ab.append("~");
                     for (0..padding - 1) |_| {
                         try ab.append(" ");
@@ -202,15 +210,37 @@ const Editor = struct {
 
         try self.drawRows(&ab);
 
-        try ab.append("\x1b[H");
+        try ab.appendFmt("\x1b[{d};{d}H", .{ self.cy + 1, self.cx + 1 });
         try ab.append("\x1b[?25h");
         _ = try std.posix.write(std.posix.STDOUT_FILENO, ab.items());
     }
 
-    fn processKeypress(_: *Editor) !bool {
+    fn moveCursor(self: *Editor, key: u8) void {
+        switch (key) {
+            'a' => {
+                if (self.cx != 0) self.cx -= 1;
+            },
+            'd' => {
+                if (self.cx != self.screenCols - 1) self.cx += 1;
+            },
+            'w' => {
+                if (self.cy != 0) self.cy -= 1;
+            },
+            's' => {
+                if (self.cy != self.screenRows - 1) self.cy += 1;
+            },
+            else => {},
+        }
+    }
+
+    fn processKeypress(self: *Editor) !bool {
         const c = (try editorReadKey()) orelse return true;
         if (c == ctrlKey('q')) {
             return false;
+        }
+
+        if (c == 'w' or c == 'a' or c == 's' or c == 'd') {
+            self.moveCursor(c);
         }
 
         return true;
