@@ -220,11 +220,20 @@ const AppendBuffer = struct {
     }
 };
 
+const EditorRow = struct {
+    chars: []const u8,
+
+    fn len(self: EditorRow) usize {
+        return self.chars.len;
+    }
+};
+
 const Editor = struct {
     cx: usize = 0,
     cy: usize = 0,
     screenRows: usize = 24,
     screenCols: usize = 80,
+    rows: std.ArrayList(EditorRow),
 
     fn init() !Editor {
         const ws = try getWindowSize();
@@ -233,12 +242,45 @@ const Editor = struct {
             .cy = 0,
             .screenRows = ws.row,
             .screenCols = ws.col,
+            .rows = .empty,
         };
+    }
+
+    fn appendRow(self: *Editor, line: []const u8) !void {
+        const chars = try std.heap.page_allocator.alloc(u8, line.len);
+        @memcpy(chars, line);
+        try self.rows.append(std.heap.page_allocator, .{
+            .chars = chars,
+        });
+    }
+
+    fn open(self: *Editor, filename: []const u8) !void {
+        const cwd = std.fs.cwd();
+        const file = try cwd.openFile(filename, .{});
+        defer file.close();
+
+        const stat = try file.stat();
+        const contents = try file.readToEndAlloc(std.heap.page_allocator, stat.size);
+        defer std.heap.page_allocator.free(contents);
+
+        var lines = std.mem.splitScalar(u8, contents, '\n');
+        while (lines.next()) |line| {
+            var line_slice = line;
+            if (line_slice.len > 0 and line_slice[line_slice.len - 1] == '\r') {
+                line_slice = line_slice[0 .. line_slice.len - 1];
+            }
+
+            try self.appendRow(line_slice);
+        }
     }
 
     fn drawRows(self: *const Editor, ab: *AppendBuffer) !void {
         for (0..self.screenRows) |y| {
-            if (y == self.screenRows / 3) {
+            if (y < self.rows.items.len) {
+                const row = self.rows.items[y];
+                const len = @min(row.len(), self.screenCols);
+                try ab.append(row.chars[0..len]);
+            } else if (y == self.screenRows / 3) {
                 const welcome = "Kilo Zig -- version " ++ KILO_ZIG_VERSION;
                 const padding = (self.screenCols - welcome.len) / 2;
                 if (padding > 0) {
@@ -331,7 +373,15 @@ pub fn main() !void {
         std.log.err("Failed to disable raw mode.", .{});
     };
 
+    var args = try std.process.argsWithAllocator(std.heap.page_allocator);
+    defer args.deinit();
+
+    _ = args.skip();
+
     var editor = try Editor.init();
+    if (args.next()) |filename| {
+        try editor.open(filename);
+    }
 
     while (true) {
         editor.refreshScreen() catch {
