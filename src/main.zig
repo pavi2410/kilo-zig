@@ -49,6 +49,7 @@ fn editorReadByte() !?u8 {
 
 const EditorKey = union(enum) {
     byte: u8,
+    enter,
     arrow_left,
     arrow_right,
     arrow_up,
@@ -62,6 +63,9 @@ const EditorKey = union(enum) {
 
 fn editorReadKey() !?EditorKey {
     const first = (try editorReadByte()) orelse return null;
+    if (first == '\r') {
+        return .enter;
+    }
     if (first != '\x1b') {
         return .{ .byte = first };
     }
@@ -325,6 +329,18 @@ const Editor = struct {
         try self.updateRow(&self.rows.items[self.rows.items.len - 1]);
     }
 
+    fn rowInsertChar(self: *Editor, row: *EditorRow, at: usize, c: u8) !void {
+        const insert_at = @min(at, row.len());
+        const new_chars = try self.allocator.alloc(u8, row.len() + 1);
+        @memcpy(new_chars[0..insert_at], row.chars[0..insert_at]);
+        new_chars[insert_at] = c;
+        @memcpy(new_chars[insert_at + 1 ..], row.chars[insert_at..]);
+
+        self.allocator.free(row.chars);
+        row.chars = new_chars;
+        try self.updateRow(row);
+    }
+
     fn open(self: *Editor, filename: []const u8) !void {
         self.filename = try self.allocator.dupe(u8, filename);
 
@@ -390,6 +406,15 @@ const Editor = struct {
             const len = @min(status_message.len, self.screenCols);
             try ab.append(status_message[0..len]);
         }
+    }
+
+    fn insertChar(self: *Editor, c: u8) !void {
+        if (self.cy == self.rows.items.len) {
+            try self.appendRow("");
+        }
+
+        try self.rowInsertChar(&self.rows.items[self.cy], self.cx, c);
+        self.cx += 1;
     }
 
     fn drawRows(self: *const Editor, ab: *AppendBuffer) !void {
@@ -512,8 +537,13 @@ const Editor = struct {
                 if (c == ctrlKey('q')) {
                     return false;
                 }
+                if (c == ctrlKey('l') or c == '\x1b' or c == ctrlKey('h') or c == 127) {
+                    return true;
+                }
+                try self.insertChar(c);
             },
             .arrow_left, .arrow_right, .arrow_up, .arrow_down => self.moveCursor(key),
+            .enter => {},
             .page_up => {
                 self.cy = self.rowOff;
                 for (0..self.screenRows) |_| {
