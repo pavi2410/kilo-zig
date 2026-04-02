@@ -2,6 +2,7 @@ const std = @import("std");
 const kilo_zig = @import("kilo_zig");
 
 const KILO_ZIG_VERSION = "0.0.1";
+const KILO_TAB_STOP = 8;
 
 fn disableRawMode(original_termios: std.posix.termios) !void {
     try std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, original_termios);
@@ -222,9 +223,14 @@ const AppendBuffer = struct {
 
 const EditorRow = struct {
     chars: []const u8,
+    render: []u8,
 
     fn len(self: EditorRow) usize {
         return self.chars.len;
+    }
+
+    fn renderLen(self: EditorRow) usize {
+        return self.render.len;
     }
 };
 
@@ -232,6 +238,7 @@ const Editor = struct {
     allocator: std.mem.Allocator,
     cx: usize = 0,
     cy: usize = 0,
+    rx: usize = 0,
     rowOff: usize = 0,
     colOff: usize = 0,
     screenRows: usize = 24,
@@ -244,6 +251,7 @@ const Editor = struct {
             .allocator = allocator,
             .cx = 0,
             .cy = 0,
+            .rx = 0,
             .rowOff = 0,
             .colOff = 0,
             .screenRows = ws.row,
@@ -255,8 +263,46 @@ const Editor = struct {
     fn deinit(self: *Editor) void {
         for (self.rows.items) |row| {
             self.allocator.free(row.chars);
+            self.allocator.free(row.render);
         }
         self.rows.deinit(self.allocator);
+    }
+
+    fn rowCxToRx(_: *const Editor, row: EditorRow, cx: usize) usize {
+        var rx: usize = 0;
+        for (row.chars[0..@min(cx, row.len())]) |c| {
+            if (c == '\t') {
+                rx += (KILO_TAB_STOP - 1) - (rx % KILO_TAB_STOP);
+            }
+            rx += 1;
+        }
+        return rx;
+    }
+
+    fn updateRow(self: *Editor, row: *EditorRow) !void {
+        var tabs: usize = 0;
+        for (row.chars) |c| {
+            if (c == '\t') tabs += 1;
+        }
+
+        self.allocator.free(row.render);
+        row.render = try self.allocator.alloc(u8, row.len() + tabs * (KILO_TAB_STOP - 1));
+
+        var idx: usize = 0;
+        for (row.chars) |c| {
+            if (c == '\t') {
+                row.render[idx] = ' ';
+                idx += 1;
+                while (idx % KILO_TAB_STOP != 0) {
+                    row.render[idx] = ' ';
+                    idx += 1;
+                }
+            } else {
+                row.render[idx] = c;
+                idx += 1;
+            }
+        }
+        row.render = row.render[0..idx];
     }
 
     fn appendRow(self: *Editor, line: []const u8) !void {
@@ -264,7 +310,9 @@ const Editor = struct {
         @memcpy(chars, line);
         try self.rows.append(self.allocator, .{
             .chars = chars,
+            .render = try self.allocator.alloc(u8, 0),
         });
+        try self.updateRow(&self.rows.items[self.rows.items.len - 1]);
     }
 
     fn open(self: *Editor, filename: []const u8) !void {
@@ -292,11 +340,11 @@ const Editor = struct {
             const fileRow = y + self.rowOff;
             if (fileRow < self.rows.items.len) {
                 const row = self.rows.items[fileRow];
-                if (self.colOff < row.len()) {
-                    const len = @min(row.len() - self.colOff, self.screenCols);
-                    try ab.append(row.chars[self.colOff .. self.colOff + len]);
+                if (self.colOff < row.renderLen()) {
+                    const len = @min(row.renderLen() - self.colOff, self.screenCols);
+                    try ab.append(row.render[self.colOff .. self.colOff + len]);
                 }
-            } else if (y == self.screenRows / 3) {
+            } else if (self.rows.items.len == 0 and y == self.screenRows / 3) {
                 const welcome = "Kilo Zig -- version " ++ KILO_ZIG_VERSION;
                 const padding = (self.screenCols - welcome.len) / 2;
                 if (padding > 0) {
@@ -318,6 +366,11 @@ const Editor = struct {
     }
 
     fn scroll(self: *Editor) void {
+        self.rx = 0;
+        if (self.cy < self.rows.items.len) {
+            self.rx = self.rowCxToRx(self.rows.items[self.cy], self.cx);
+        }
+
         if (self.cy < self.rowOff) {
             self.rowOff = self.cy;
         }
@@ -326,12 +379,12 @@ const Editor = struct {
             self.rowOff = self.cy - self.screenRows + 1;
         }
 
-        if (self.cx < self.colOff) {
-            self.colOff = self.cx;
+        if (self.rx < self.colOff) {
+            self.colOff = self.rx;
         }
 
-        if (self.cx >= self.colOff + self.screenCols) {
-            self.colOff = self.cx - self.screenCols + 1;
+        if (self.rx >= self.colOff + self.screenCols) {
+            self.colOff = self.rx - self.screenCols + 1;
         }
     }
 
@@ -347,7 +400,7 @@ const Editor = struct {
 
         try self.drawRows(&ab);
 
-        try ab.appendFmt("\x1b[{d};{d}H", .{ (self.cy - self.rowOff) + 1, (self.cx - self.colOff) + 1 });
+        try ab.appendFmt("\x1b[{d};{d}H", .{ (self.cy - self.rowOff) + 1, (self.rx - self.colOff) + 1 });
         try ab.append("\x1b[?25h");
         _ = try std.posix.write(std.posix.STDOUT_FILENO, ab.items());
     }
