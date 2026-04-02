@@ -345,13 +345,29 @@ const Editor = struct {
         _ = try std.posix.write(std.posix.STDOUT_FILENO, ab.items());
     }
 
+    fn rowLen(self: *const Editor, row_index: usize) usize {
+        if (row_index >= self.rows.items.len) return 0;
+        return self.rows.items[row_index].len();
+    }
+
     fn moveCursor(self: *Editor, key: EditorKey) void {
         switch (key) {
             .arrow_left => {
-                if (self.cx != 0) self.cx -= 1;
+                if (self.cx != 0) {
+                    self.cx -= 1;
+                } else if (self.cy > 0) {
+                    self.cy -= 1;
+                    self.cx = self.rowLen(self.cy);
+                }
             },
             .arrow_right => {
-                if (self.cx != self.screenCols - 1) self.cx += 1;
+                const row_len = self.rowLen(self.cy);
+                if (self.cx < row_len) {
+                    self.cx += 1;
+                } else if (self.cy < self.rows.items.len) {
+                    self.cy += 1;
+                    self.cx = 0;
+                }
             },
             .arrow_up => {
                 if (self.cy != 0) self.cy -= 1;
@@ -360,6 +376,11 @@ const Editor = struct {
                 if (self.cy < self.rows.items.len) self.cy += 1;
             },
             else => {},
+        }
+
+        const row_len = self.rowLen(self.cy);
+        if (self.cx > row_len) {
+            self.cx = row_len;
         }
     }
 
@@ -379,13 +400,13 @@ const Editor = struct {
                 }
             },
             .page_down => {
-                self.cy = self.screenRows - 1;
+                self.cy = @min(self.rowOff + self.screenRows - 1, self.rows.items.len);
                 for (0..self.screenRows) |_| {
                     self.moveCursor(.arrow_down);
                 }
             },
             .home => self.cx = 0,
-            .end => self.cx = self.screenCols - 1,
+            .end => self.cx = self.rowLen(self.cy),
             .delete => {},
         }
 
