@@ -298,6 +298,19 @@ const Editor = struct {
         return rx;
     }
 
+    fn rowRxToCx(_: *const Editor, row: EditorRow, rx: usize) usize {
+        var cur_rx: usize = 0;
+        var cx: usize = 0;
+        while (cx < row.len()) : (cx += 1) {
+            if (row.chars[cx] == '\t') {
+                cur_rx += (KILO_TAB_STOP - 1) - (cur_rx % KILO_TAB_STOP);
+            }
+            cur_rx += 1;
+            if (cur_rx > rx) return cx;
+        }
+        return cx;
+    }
+
     fn updateRow(self: *Editor, row: *EditorRow) !void {
         var tabs: usize = 0;
         for (row.chars) |c| {
@@ -480,6 +493,20 @@ const Editor = struct {
         var status_buf: [80]u8 = undefined;
         const status = try std.fmt.bufPrint(&status_buf, "{d} bytes written to disk", .{contents.len});
         try self.setStatusMessage(status);
+    }
+
+    fn find(self: *Editor) !void {
+        const query = (try self.prompt("Search: {s} (ESC to cancel)")) orelse return;
+        defer self.allocator.free(query);
+
+        for (self.rows.items, 0..) |row, i| {
+            if (std.mem.indexOf(u8, row.render, query)) |match_index| {
+                self.cy = i;
+                self.cx = self.rowRxToCx(row, match_index);
+                self.rowOff = self.rows.items.len;
+                break;
+            }
+        }
     }
 
     fn setStatusMessage(self: *Editor, message: []const u8) !void {
@@ -709,6 +736,11 @@ const Editor = struct {
                     self.quitTimes = KILO_QUIT_TIMES;
                     return true;
                 }
+                if (c == ctrlKey('f')) {
+                    try self.find();
+                    self.quitTimes = KILO_QUIT_TIMES;
+                    return true;
+                }
                 if (c == ctrlKey('h') or c == 127) {
                     try self.deleteChar();
                     self.quitTimes = KILO_QUIT_TIMES;
@@ -763,7 +795,7 @@ pub fn main() !void {
 
     var editor = try Editor.init(std.heap.page_allocator);
     defer editor.deinit();
-    try editor.setStatusMessage("HELP: Ctrl-Q = quit");
+    try editor.setStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
     if (args.next()) |filename| {
         try editor.open(filename);
     }
