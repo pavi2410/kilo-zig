@@ -325,13 +325,17 @@ const Editor = struct {
     }
 
     fn appendRow(self: *Editor, line: []const u8) !void {
+        try self.insertRow(self.rows.items.len, line);
+    }
+
+    fn insertRow(self: *Editor, at: usize, line: []const u8) !void {
         const chars = try self.allocator.alloc(u8, line.len);
         @memcpy(chars, line);
-        try self.rows.append(self.allocator, .{
+        try self.rows.insert(self.allocator, at, .{
             .chars = chars,
             .render = try self.allocator.alloc(u8, 0),
         });
-        try self.updateRow(&self.rows.items[self.rows.items.len - 1]);
+        try self.updateRow(&self.rows.items[at]);
         self.dirty += 1;
     }
 
@@ -345,6 +349,37 @@ const Editor = struct {
         self.allocator.free(row.chars);
         row.chars = new_chars;
         try self.updateRow(row);
+        self.dirty += 1;
+    }
+
+    fn rowAppendString(self: *Editor, row: *EditorRow, s: []const u8) !void {
+        const new_chars = try self.allocator.alloc(u8, row.len() + s.len);
+        @memcpy(new_chars[0..row.len()], row.chars);
+        @memcpy(new_chars[row.len()..], s);
+
+        self.allocator.free(row.chars);
+        row.chars = new_chars;
+        try self.updateRow(row);
+        self.dirty += 1;
+    }
+
+    fn rowDeleteChar(self: *Editor, row: *EditorRow, at: usize) !void {
+        if (row.len() == 0 or at >= row.len()) return;
+
+        const new_chars = try self.allocator.alloc(u8, row.len() - 1);
+        @memcpy(new_chars[0..at], row.chars[0..at]);
+        @memcpy(new_chars[at..], row.chars[at + 1 ..]);
+
+        self.allocator.free(row.chars);
+        row.chars = new_chars;
+        try self.updateRow(row);
+        self.dirty += 1;
+    }
+
+    fn deleteRow(self: *Editor, at: usize) void {
+        const row = self.rows.orderedRemove(at);
+        self.allocator.free(row.chars);
+        self.allocator.free(row.render);
         self.dirty += 1;
     }
 
@@ -456,6 +491,43 @@ const Editor = struct {
 
         try self.rowInsertChar(&self.rows.items[self.cy], self.cx, c);
         self.cx += 1;
+    }
+
+    fn insertNewline(self: *Editor) !void {
+        if (self.cx == 0) {
+            try self.insertRow(self.cy, "");
+        } else {
+            const row = self.rows.items[self.cy];
+            try self.insertRow(self.cy + 1, row.chars[self.cx..]);
+
+            const new_chars = try self.allocator.alloc(u8, self.cx);
+            @memcpy(new_chars, row.chars[0..self.cx]);
+
+            self.allocator.free(self.rows.items[self.cy].chars);
+            self.rows.items[self.cy].chars = new_chars;
+            try self.updateRow(&self.rows.items[self.cy]);
+            self.dirty += 1;
+        }
+
+        self.cy += 1;
+        self.cx = 0;
+    }
+
+    fn deleteChar(self: *Editor) !void {
+        if (self.cy == self.rows.items.len) return;
+        if (self.cx == 0 and self.cy == 0) return;
+
+        if (self.cx > 0) {
+            try self.rowDeleteChar(&self.rows.items[self.cy], self.cx - 1);
+            self.cx -= 1;
+        } else {
+            const prev_row_len = self.rowLen(self.cy - 1);
+            const current_chars = self.rows.items[self.cy].chars;
+            try self.rowAppendString(&self.rows.items[self.cy - 1], current_chars);
+            self.deleteRow(self.cy);
+            self.cy -= 1;
+            self.cx = prev_row_len;
+        }
     }
 
     fn drawRows(self: *const Editor, ab: *AppendBuffer) !void {
@@ -594,14 +666,19 @@ const Editor = struct {
                     self.quitTimes = KILO_QUIT_TIMES;
                     return true;
                 }
-                if (c == ctrlKey('l') or c == '\x1b' or c == ctrlKey('h') or c == 127) {
+                if (c == ctrlKey('h') or c == 127) {
+                    try self.deleteChar();
+                    self.quitTimes = KILO_QUIT_TIMES;
+                    return true;
+                }
+                if (c == ctrlKey('l') or c == '\x1b') {
                     self.quitTimes = KILO_QUIT_TIMES;
                     return true;
                 }
                 try self.insertChar(c);
             },
             .arrow_left, .arrow_right, .arrow_up, .arrow_down => self.moveCursor(key),
-            .enter => {},
+            .enter => try self.insertNewline(),
             .page_up => {
                 self.cy = self.rowOff;
                 for (0..self.screenRows) |_| {
@@ -616,7 +693,10 @@ const Editor = struct {
             },
             .home => self.cx = 0,
             .end => self.cx = self.rowLen(self.cy),
-            .delete => {},
+            .delete => {
+                self.moveCursor(.arrow_right);
+                try self.deleteChar();
+            },
         }
 
         self.quitTimes = KILO_QUIT_TIMES;
