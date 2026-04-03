@@ -1,0 +1,3 @@
+This is a dummy file for kilo-zig.
+You can open it, edit a few characters, and press Ctrl-S.
+Tabs	render	here.

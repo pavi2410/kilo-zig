@@ -3,6 +3,7 @@ const kilo_zig = @import("kilo_zig");
 
 const KILO_ZIG_VERSION = "0.0.1";
 const KILO_TAB_STOP = 8;
+const KILO_QUIT_TIMES = 3;
 
 fn disableRawMode(original_termios: std.posix.termios) !void {
     try std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, original_termios);
@@ -242,6 +243,8 @@ const Editor = struct {
     allocator: std.mem.Allocator,
     filename: ?[]u8 = null,
     statusMessage: ?[]u8 = null,
+    dirty: usize = 0,
+    quitTimes: usize = KILO_QUIT_TIMES,
     cx: usize = 0,
     cy: usize = 0,
     rx: usize = 0,
@@ -257,6 +260,8 @@ const Editor = struct {
             .allocator = allocator,
             .filename = null,
             .statusMessage = null,
+            .dirty = 0,
+            .quitTimes = KILO_QUIT_TIMES,
             .cx = 0,
             .cy = 0,
             .rx = 0,
@@ -327,6 +332,7 @@ const Editor = struct {
             .render = try self.allocator.alloc(u8, 0),
         });
         try self.updateRow(&self.rows.items[self.rows.items.len - 1]);
+        self.dirty += 1;
     }
 
     fn rowInsertChar(self: *Editor, row: *EditorRow, at: usize, c: u8) !void {
@@ -339,6 +345,7 @@ const Editor = struct {
         self.allocator.free(row.chars);
         row.chars = new_chars;
         try self.updateRow(row);
+        self.dirty += 1;
     }
 
     fn open(self: *Editor, filename: []const u8) !void {
@@ -361,6 +368,40 @@ const Editor = struct {
 
             try self.appendRow(line_slice);
         }
+        self.dirty = 0;
+    }
+
+    fn rowsToString(self: *Editor) ![]u8 {
+        var buf = std.ArrayList(u8).empty;
+        defer buf.deinit(self.allocator);
+
+        for (self.rows.items) |row| {
+            try buf.appendSlice(self.allocator, row.chars);
+            try buf.append(self.allocator, '\n');
+        }
+
+        return try buf.toOwnedSlice(self.allocator);
+    }
+
+    fn save(self: *Editor) !void {
+        const filename = self.filename orelse {
+            try self.setStatusMessage("Save aborted: no filename");
+            return;
+        };
+
+        const contents = try self.rowsToString();
+        defer self.allocator.free(contents);
+
+        const cwd = std.fs.cwd();
+        const file = try cwd.createFile(filename, .{ .truncate = true });
+        defer file.close();
+
+        try file.writeAll(contents);
+        self.dirty = 0;
+
+        var status_buf: [80]u8 = undefined;
+        const status = try std.fmt.bufPrint(&status_buf, "{d} bytes written to disk", .{contents.len});
+        try self.setStatusMessage(status);
     }
 
     fn setStatusMessage(self: *Editor, message: []const u8) !void {
@@ -377,8 +418,8 @@ const Editor = struct {
         const filename = self.filename orelse "[No Name]";
         const status = try std.fmt.bufPrint(
             &status_buf,
-            "{s} - {d} lines",
-            .{ filename[0..@min(filename.len, 20)], self.rows.items.len },
+            "{s} - {d} lines {s}",
+            .{ filename[0..@min(filename.len, 20)], self.rows.items.len, if (self.dirty > 0) "(modified)" else "" },
         );
 
         var rstatus_buf: [80]u8 = undefined;
@@ -535,9 +576,26 @@ const Editor = struct {
         switch (key) {
             .byte => |c| {
                 if (c == ctrlKey('q')) {
+                    if (self.dirty > 0 and self.quitTimes > 0) {
+                        var status_buf: [128]u8 = undefined;
+                        const status = try std.fmt.bufPrint(
+                            &status_buf,
+                            "WARNING!!! File has unsaved changes. Press Ctrl-Q {d} more times to quit.",
+                            .{self.quitTimes},
+                        );
+                        try self.setStatusMessage(status);
+                        self.quitTimes -= 1;
+                        return true;
+                    }
                     return false;
                 }
+                if (c == ctrlKey('s')) {
+                    try self.save();
+                    self.quitTimes = KILO_QUIT_TIMES;
+                    return true;
+                }
                 if (c == ctrlKey('l') or c == '\x1b' or c == ctrlKey('h') or c == 127) {
+                    self.quitTimes = KILO_QUIT_TIMES;
                     return true;
                 }
                 try self.insertChar(c);
@@ -561,6 +619,7 @@ const Editor = struct {
             .delete => {},
         }
 
+        self.quitTimes = KILO_QUIT_TIMES;
         return true;
     }
 };
