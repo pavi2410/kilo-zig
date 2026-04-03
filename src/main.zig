@@ -4,8 +4,11 @@ const kilo_zig = @import("kilo_zig");
 const KILO_ZIG_VERSION = "0.0.1";
 const KILO_TAB_STOP = 8;
 const KILO_QUIT_TIMES = 3;
-const HL_HIGHLIGHT_NUMBERS: u32 = 1 << 0;
-const HL_HIGHLIGHT_STRINGS: u32 = 1 << 1;
+const SyntaxFlags = packed struct(u32) {
+    highlight_numbers: bool = false,
+    highlight_strings: bool = false,
+    _: u30 = 0,
+};
 
 const EditorHighlight = enum(u8) {
     normal = 0,
@@ -25,31 +28,31 @@ const EditorSyntax = struct {
     singleline_comment_start: ?[]const u8,
     multiline_comment_start: ?[]const u8,
     multiline_comment_end: ?[]const u8,
-    flags: u32,
+    flags: SyntaxFlags,
 };
 
 const c_filematch = [_][]const u8{ ".c", ".h", ".cpp", ".hpp", ".cc" };
 const c_keywords = [_][]const u8{
-    "switch",   "if",       "while",    "for",      "break",   "continue",
-    "return",   "else",     "struct",   "union",    "typedef", "static",
-    "enum",     "class",    "case",     "int|",     "long|",   "double|",
-    "float|",   "char|",    "unsigned|","signed|",  "void|",   "short|",
-    "const|",   "size_t|",  "bool|",
+    "switch", "if",      "while",     "for",     "break",   "continue",
+    "return", "else",    "struct",    "union",   "typedef", "static",
+    "enum",   "class",   "case",      "int|",    "long|",   "double|",
+    "float|", "char|",   "unsigned|", "signed|", "void|",   "short|",
+    "const|", "size_t|", "bool|",
 };
 const zig_filematch = [_][]const u8{ ".zig", ".zon" };
 const zig_keywords = [_][]const u8{
-    "addrspace", "align",      "allowzero", "and",        "anyframe|", "anytype|",
-    "asm",       "async",      "await",     "break",      "callconv",  "catch",
-    "comptime",  "const|",     "continue",  "defer",      "else",      "enum",
-    "errdefer",  "error",      "export",    "extern",     "false|",    "fn",
-    "for",       "if",         "inline",    "linksection","noalias",   "noinline",
-    "nosuspend", "opaque",     "or",        "orelse",     "packed",    "pub",
-    "resume",    "return",     "struct",    "suspend",    "switch",    "test",
-    "threadlocal","true|",     "try",       "union",      "unreachable","usingnamespace",
-    "var|",      "volatile",   "while",     "void|",      "bool|",     "usize|",
-    "isize|",    "u8|",        "u16|",      "u32|",       "u64|",      "u128|",
-    "i8|",       "i16|",       "i32|",      "i64|",       "i128|",     "f16|",
-    "f32|",      "f64|",       "f80|",      "f128|",
+    "addrspace",   "align",    "allowzero", "and",         "anyframe|",   "anytype|",
+    "asm",         "async",    "await",     "break",       "callconv",    "catch",
+    "comptime",    "const|",   "continue",  "defer",       "else",        "enum",
+    "errdefer",    "error",    "export",    "extern",      "false|",      "fn",
+    "for",         "if",       "inline",    "linksection", "noalias",     "noinline",
+    "nosuspend",   "opaque",   "or",        "orelse",      "packed",      "pub",
+    "resume",      "return",   "struct",    "suspend",     "switch",      "test",
+    "threadlocal", "true|",    "try",       "union",       "unreachable", "usingnamespace",
+    "var|",        "volatile", "while",     "void|",       "bool|",       "usize|",
+    "isize|",      "u8|",      "u16|",      "u32|",        "u64|",        "u128|",
+    "i8|",         "i16|",     "i32|",      "i64|",        "i128|",       "f16|",
+    "f32|",        "f64|",     "f80|",      "f128|",
 };
 const hldb = [_]EditorSyntax{
     .{
@@ -59,7 +62,7 @@ const hldb = [_]EditorSyntax{
         .singleline_comment_start = "//",
         .multiline_comment_start = "/*",
         .multiline_comment_end = "*/",
-        .flags = HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS,
+        .flags = .{ .highlight_numbers = true, .highlight_strings = true },
     },
     .{
         .filetype = "zig",
@@ -68,7 +71,7 @@ const hldb = [_]EditorSyntax{
         .singleline_comment_start = "//",
         .multiline_comment_start = null,
         .multiline_comment_end = null,
-        .flags = HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS,
+        .flags = .{ .highlight_numbers = true, .highlight_strings = true },
     },
 };
 
@@ -198,15 +201,7 @@ fn getCursorPosition() !std.posix.winsize {
     }
     buf[i] = 0; // Null-terminate the buffer
 
-    std.debug.print("\r\nbuf[1] = {c}\r\n", .{buf[1]});
-
-    // if (buf[0] != '\x1b' || buf[1] != '[') return -1;
-    //   if (sscanf(&buf[2], "%d;%d", rows, cols) != 2) return -1;
-
-    if (buf[0] != '\x1b' or buf[1] != '[') {
-        std.debug.print("Unexpected response format: {s}\r\n", .{buf[0..i]});
-        return error.UnexpectedResponse;
-    }
+    if (buf[0] != '\x1b' or buf[1] != '[') return error.UnexpectedResponse;
 
     var rows: usize = 0;
     var cols: usize = 0;
@@ -214,28 +209,20 @@ fn getCursorPosition() !std.posix.winsize {
     var num_index: usize = 0;
     for (buf[2..i]) |c| {
         if (c == ';') {
-            rows = std.fmt.parseInt(usize, num_buf[0..num_index], 10) catch {
-                std.debug.print("Failed to parse rows: {s}\r\n", .{num_buf[0..num_index]});
-                return error.UnexpectedResponse;
-            };
+            rows = std.fmt.parseInt(usize, num_buf[0..num_index], 10) catch return error.UnexpectedResponse;
             num_index = 0;
         } else {
             if (num_index < num_buf.len) {
                 num_buf[num_index] = c;
                 num_index += 1;
             } else {
-                std.debug.print("Number buffer overflow while parsing: {s}\r\n", .{num_buf});
                 return error.UnexpectedResponse;
             }
         }
     }
     if (num_index > 0) {
-        cols = std.fmt.parseInt(usize, num_buf[0..num_index], 10) catch {
-            std.debug.print("Failed to parse columns: {s}\r\n", .{num_buf[0..num_index]});
-            return error.UnexpectedResponse;
-        };
+        cols = std.fmt.parseInt(usize, num_buf[0..num_index], 10) catch return error.UnexpectedResponse;
     } else {
-        std.debug.print("No columns data found in response: {s}\r\n", .{buf[0..i]});
         return error.UnexpectedResponse;
     }
 
@@ -269,33 +256,6 @@ fn getWindowSize() !std.posix.winsize {
     }
 }
 
-const AppendBuffer = struct {
-    buffer: std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-
-    fn init(allocator: std.mem.Allocator) AppendBuffer {
-        return .{
-            .buffer = .empty,
-            .allocator = allocator,
-        };
-    }
-
-    fn deinit(self: *AppendBuffer) void {
-        self.buffer.deinit(self.allocator);
-    }
-
-    fn append(self: *AppendBuffer, slice: []const u8) !void {
-        try self.buffer.appendSlice(self.allocator, slice);
-    }
-
-    fn appendFmt(self: *AppendBuffer, comptime fmt: []const u8, args: anytype) !void {
-        try self.buffer.writer(self.allocator).print(fmt, args);
-    }
-
-    fn items(self: *const AppendBuffer) []const u8 {
-        return self.buffer.items;
-    }
-};
 
 const EditorRow = struct {
     chars: []const u8,
@@ -317,7 +277,7 @@ const Editor = struct {
     syntax: ?*const EditorSyntax = null,
     filename: ?[]u8 = null,
     statusMessage: ?[]u8 = null,
-    dirty: usize = 0,
+    dirty: bool = false,
     quitTimes: usize = KILO_QUIT_TIMES,
     searchLastMatch: ?usize = null,
     searchDirection: isize = 1,
@@ -336,20 +296,6 @@ const Editor = struct {
         const ws = try getWindowSize();
         return .{
             .allocator = allocator,
-            .syntax = null,
-            .filename = null,
-            .statusMessage = null,
-            .dirty = 0,
-            .quitTimes = KILO_QUIT_TIMES,
-            .searchLastMatch = null,
-            .searchDirection = 1,
-            .savedHlLine = null,
-            .savedHl = null,
-            .cx = 0,
-            .cy = 0,
-            .rx = 0,
-            .rowOff = 0,
-            .colOff = 0,
             .screenRows = ws.row - 2,
             .screenCols = ws.col,
             .rows = .empty,
@@ -514,7 +460,7 @@ const Editor = struct {
                 }
             }
 
-            if ((syntax.flags & HL_HIGHLIGHT_STRINGS) != 0) {
+            if (syntax.flags.highlight_strings) {
                 if (in_string != 0) {
                     row.hl[i] = .string;
                     if (c == '\\' and i + 1 < row.renderLen()) {
@@ -535,7 +481,7 @@ const Editor = struct {
                 }
             }
 
-            if ((syntax.flags & HL_HIGHLIGHT_NUMBERS) != 0) {
+            if (syntax.flags.highlight_numbers) {
                 if ((std.ascii.isDigit(c) and (prev_sep or prev_hl == .number)) or
                     (c == '.' and prev_hl == .number))
                 {
@@ -587,7 +533,7 @@ const Editor = struct {
             .hl_open_comment = false,
         });
         try self.updateRow(at);
-        self.dirty += 1;
+        self.dirty = true;
     }
 
     fn rowInsertChar(self: *Editor, row_index: usize, at: usize, c: u8) !void {
@@ -601,7 +547,7 @@ const Editor = struct {
         self.allocator.free(row.chars);
         row.chars = new_chars;
         try self.updateRow(row_index);
-        self.dirty += 1;
+        self.dirty = true;
     }
 
     fn rowAppendString(self: *Editor, row_index: usize, s: []const u8) !void {
@@ -613,7 +559,7 @@ const Editor = struct {
         self.allocator.free(row.chars);
         row.chars = new_chars;
         try self.updateRow(row_index);
-        self.dirty += 1;
+        self.dirty = true;
     }
 
     fn rowDeleteChar(self: *Editor, row_index: usize, at: usize) !void {
@@ -627,7 +573,7 @@ const Editor = struct {
         self.allocator.free(row.chars);
         row.chars = new_chars;
         try self.updateRow(row_index);
-        self.dirty += 1;
+        self.dirty = true;
     }
 
     fn deleteRow(self: *Editor, at: usize) void {
@@ -635,7 +581,7 @@ const Editor = struct {
         self.allocator.free(row.chars);
         self.allocator.free(row.render);
         self.allocator.free(row.hl);
-        self.dirty += 1;
+        self.dirty = true;
     }
 
     fn open(self: *Editor, filename: []const u8) !void {
@@ -654,15 +600,10 @@ const Editor = struct {
 
         var lines = std.mem.splitScalar(u8, contents, '\n');
         while (lines.next()) |line| {
-            var line_slice = line;
-            if (line_slice.len > 0 and line_slice[line_slice.len - 1] == '\r') {
-                line_slice = line_slice[0 .. line_slice.len - 1];
-            }
-
-            try self.appendRow(line_slice);
+            try self.appendRow(std.mem.trimRight(u8, line, "\r"));
         }
         try self.selectSyntaxHighlight();
-        self.dirty = 0;
+        self.dirty = false;
     }
 
     fn prompt(
@@ -751,7 +692,7 @@ const Editor = struct {
         defer file.close();
 
         try file.writeAll(contents);
-        self.dirty = 0;
+        self.dirty = false;
 
         var status_buf: [80]u8 = undefined;
         const status = try std.fmt.bufPrint(&status_buf, "{d} bytes written to disk", .{contents.len});
@@ -769,25 +710,12 @@ const Editor = struct {
         }
 
         switch (key) {
-            .enter => {
-                self.searchLastMatch = null;
-                self.searchDirection = 1;
-                return;
-            },
-            .byte => |c| {
-                if (c == '\x1b') {
-                    self.searchLastMatch = null;
-                    self.searchDirection = 1;
-                    return;
-                }
-                self.searchLastMatch = null;
-                self.searchDirection = 1;
-            },
             .arrow_right, .arrow_down => self.searchDirection = 1,
             .arrow_left, .arrow_up => self.searchDirection = -1,
             else => {
                 self.searchLastMatch = null;
                 self.searchDirection = 1;
+                if (key == .enter or (key == .byte and key.byte == '\x1b')) return;
             },
         }
 
@@ -843,15 +771,15 @@ const Editor = struct {
         self.statusMessage = try self.allocator.dupe(u8, message);
     }
 
-    fn drawStatusBar(self: *const Editor, ab: *AppendBuffer) !void {
-        try ab.append("\x1b[7m");
+    fn drawStatusBar(self: *const Editor, ab: *std.ArrayList(u8)) !void {
+        try ab.appendSlice(self.allocator, "\x1b[7m");
 
         var status_buf: [80]u8 = undefined;
         const filename = self.filename orelse "[No Name]";
         const status = try std.fmt.bufPrint(
             &status_buf,
             "{s} - {d} lines {s}",
-            .{ filename[0..@min(filename.len, 20)], self.rows.items.len, if (self.dirty > 0) "(modified)" else "" },
+            .{ filename[0..@min(filename.len, 20)], self.rows.items.len, if (self.dirty) "(modified)" else "" },
         );
 
         var rstatus_buf: [80]u8 = undefined;
@@ -859,26 +787,26 @@ const Editor = struct {
         const rstatus = try std.fmt.bufPrint(&rstatus_buf, "{s} | {d}/{d}", .{ filetype, self.cy + 1, self.rows.items.len });
 
         var len: usize = @min(status.len, self.screenCols);
-        try ab.append(status[0..len]);
+        try ab.appendSlice(self.allocator, status[0..len]);
 
         while (len < self.screenCols) {
             if (self.screenCols - len == rstatus.len) {
-                try ab.append(rstatus);
+                try ab.appendSlice(self.allocator, rstatus);
                 break;
             }
 
-            try ab.append(" ");
+            try ab.append(self.allocator, ' ');
             len += 1;
         }
 
-        try ab.append("\x1b[m");
+        try ab.appendSlice(self.allocator, "\x1b[m");
     }
 
-    fn drawMessageBar(self: *const Editor, ab: *AppendBuffer) !void {
-        try ab.append("\x1b[K");
+    fn drawMessageBar(self: *const Editor, ab: *std.ArrayList(u8)) !void {
+        try ab.appendSlice(self.allocator, "\x1b[K");
         if (self.statusMessage) |status_message| {
             const len = @min(status_message.len, self.screenCols);
-            try ab.append(status_message[0..len]);
+            try ab.appendSlice(self.allocator, status_message[0..len]);
         }
     }
 
@@ -904,7 +832,7 @@ const Editor = struct {
             self.allocator.free(self.rows.items[self.cy].chars);
             self.rows.items[self.cy].chars = new_chars;
             try self.updateRow(self.cy);
-            self.dirty += 1;
+            self.dirty = true;
         }
 
         self.cy += 1;
@@ -928,7 +856,7 @@ const Editor = struct {
         }
     }
 
-    fn drawRows(self: *const Editor, ab: *AppendBuffer) !void {
+    fn drawRows(self: *const Editor, ab: *std.ArrayList(u8)) !void {
         for (0..self.screenRows) |y| {
             const fileRow = y + self.rowOff;
             if (fileRow < self.rows.items.len) {
@@ -938,32 +866,37 @@ const Editor = struct {
                     const render_slice = row.render[self.colOff .. self.colOff + len];
                     const hl_slice = row.hl[self.colOff .. self.colOff + len];
                     var current_color: ?EditorHighlight = null;
-                    for (render_slice, hl_slice) |c, hl| {
+                    var span_start: usize = 0;
+                    for (hl_slice, 0..) |hl, i| {
                         if (current_color == null or current_color.? != hl) {
-                            try ab.append(Editor.syntaxToColor(hl));
+                            if (current_color != null) {
+                                try ab.appendSlice(self.allocator, render_slice[span_start..i]);
+                            }
+                            try ab.appendSlice(self.allocator, Editor.syntaxToColor(hl));
                             current_color = hl;
+                            span_start = i;
                         }
-                        try ab.append(&[1]u8{c});
                     }
-                    try ab.append("\x1b[39m");
+                    try ab.appendSlice(self.allocator, render_slice[span_start..]);
+                    try ab.appendSlice(self.allocator, "\x1b[39m");
                 }
             } else if (self.rows.items.len == 0 and y == self.screenRows / 3) {
                 const welcome = "Kilo Zig -- version " ++ KILO_ZIG_VERSION;
                 const padding = (self.screenCols - welcome.len) / 2;
                 if (padding > 0) {
-                    try ab.append("~");
+                    try ab.appendSlice(self.allocator, "~");
                     for (0..padding - 1) |_| {
-                        try ab.append(" ");
+                        try ab.append(self.allocator, ' ');
                     }
                 }
-                try ab.append(welcome);
+                try ab.appendSlice(self.allocator, welcome);
             } else {
-                try ab.append("~");
+                try ab.appendSlice(self.allocator, "~");
             }
 
-            try ab.append("\x1b[K");
+            try ab.appendSlice(self.allocator, "\x1b[K");
             if (y < self.screenRows - 1) {
-                try ab.append("\r\n");
+                try ab.appendSlice(self.allocator, "\r\n");
             }
         }
     }
@@ -994,22 +927,22 @@ const Editor = struct {
     fn refreshScreen(self: *Editor) !void {
         self.scroll();
 
-        var ab = AppendBuffer.init(self.allocator);
-        defer ab.deinit();
-
         // Build the full frame in memory first, then write it in one shot.
-        try ab.append("\x1b[?25l");
-        try ab.append("\x1b[H");
+        var ab = std.ArrayList(u8).empty;
+        defer ab.deinit(self.allocator);
+
+        try ab.appendSlice(self.allocator, "\x1b[?25l");
+        try ab.appendSlice(self.allocator, "\x1b[H");
 
         try self.drawRows(&ab);
-        try ab.append("\r\n");
+        try ab.appendSlice(self.allocator, "\r\n");
         try self.drawStatusBar(&ab);
-        try ab.append("\r\n");
+        try ab.appendSlice(self.allocator, "\r\n");
         try self.drawMessageBar(&ab);
 
-        try ab.appendFmt("\x1b[{d};{d}H", .{ (self.cy - self.rowOff) + 1, (self.rx - self.colOff) + 1 });
-        try ab.append("\x1b[?25h");
-        _ = try std.posix.write(std.posix.STDOUT_FILENO, ab.items());
+        try ab.writer(self.allocator).print("\x1b[{d};{d}H", .{ (self.cy - self.rowOff) + 1, (self.rx - self.colOff) + 1 });
+        try ab.appendSlice(self.allocator, "\x1b[?25h");
+        _ = try std.posix.write(std.posix.STDOUT_FILENO, ab.items);
     }
 
     fn rowLen(self: *const Editor, row_index: usize) usize {
@@ -1054,9 +987,9 @@ const Editor = struct {
     fn processKeypress(self: *Editor) !bool {
         const key = (try editorReadKey()) orelse return true;
         switch (key) {
-            .byte => |c| {
-                if (c == ctrlKey('q')) {
-                    if (self.dirty > 0 and self.quitTimes > 0) {
+            .byte => |c| switch (c) {
+                ctrlKey('q') => {
+                    if (self.dirty and self.quitTimes > 0) {
                         var status_buf: [128]u8 = undefined;
                         const status = try std.fmt.bufPrint(
                             &status_buf,
@@ -1068,27 +1001,12 @@ const Editor = struct {
                         return true;
                     }
                     return false;
-                }
-                if (c == ctrlKey('s')) {
-                    try self.save();
-                    self.quitTimes = KILO_QUIT_TIMES;
-                    return true;
-                }
-                if (c == ctrlKey('f')) {
-                    try self.find();
-                    self.quitTimes = KILO_QUIT_TIMES;
-                    return true;
-                }
-                if (c == ctrlKey('h') or c == 127) {
-                    try self.deleteChar();
-                    self.quitTimes = KILO_QUIT_TIMES;
-                    return true;
-                }
-                if (c == ctrlKey('l') or c == '\x1b') {
-                    self.quitTimes = KILO_QUIT_TIMES;
-                    return true;
-                }
-                try self.insertChar(c);
+                },
+                ctrlKey('s') => try self.save(),
+                ctrlKey('f') => try self.find(),
+                ctrlKey('h'), 127 => try self.deleteChar(),
+                ctrlKey('l'), '\x1b' => {},
+                else => try self.insertChar(c),
             },
             .arrow_left, .arrow_right, .arrow_up, .arrow_down => self.moveCursor(key),
             .enter => try self.insertNewline(),
@@ -1118,6 +1036,10 @@ const Editor = struct {
 };
 
 pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
     const original_termios = enableRawMode() catch {
         std.log.err("Failed to enable raw mode.", .{});
         return;
@@ -1126,12 +1048,12 @@ pub fn main() !void {
         std.log.err("Failed to disable raw mode.", .{});
     };
 
-    var args = try std.process.argsWithAllocator(std.heap.page_allocator);
+    var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
 
     _ = args.skip();
 
-    var editor = try Editor.init(std.heap.page_allocator);
+    var editor = try Editor.init(allocator);
     defer editor.deinit();
     try editor.setStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
     if (args.next()) |filename| {
@@ -1150,7 +1072,5 @@ pub fn main() !void {
         if (!should_continue) break;
     }
 
-    // Prints to stderr, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\r\n", .{"codebase"});
     try kilo_zig.bufferedPrint();
 }
