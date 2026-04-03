@@ -19,6 +19,18 @@ const EditorHighlight = enum(u8) {
     string,
     number,
     match,
+
+    fn color(self: EditorHighlight) []const u8 {
+        return switch (self) {
+            .comment, .ml_comment => "\x1b[36m",
+            .keyword1 => "\x1b[33m",
+            .keyword2 => "\x1b[32m",
+            .string => "\x1b[35m",
+            .number => "\x1b[31m",
+            .match => "\x1b[34m",
+            .normal => "\x1b[39m",
+        };
+    }
 };
 
 const EditorSyntax = struct {
@@ -327,18 +339,6 @@ const Editor = struct {
         self.rows.deinit(self.allocator);
     }
 
-    fn syntaxToColor(hl: EditorHighlight) []const u8 {
-        return switch (hl) {
-            .comment, .ml_comment => "\x1b[36m",
-            .keyword1 => "\x1b[33m",
-            .keyword2 => "\x1b[32m",
-            .string => "\x1b[35m",
-            .number => "\x1b[31m",
-            .match => "\x1b[34m",
-            .normal => "\x1b[39m",
-        };
-    }
-
     fn selectSyntaxHighlight(self: *Editor) !void {
         self.syntax = null;
         const filename = self.filename orelse return;
@@ -363,7 +363,6 @@ const Editor = struct {
             try self.updateSyntax(i);
         }
     }
-
 
     fn updateRow(self: *Editor, row_index: usize) !void {
         const row = &self.rows.items[row_index];
@@ -587,52 +586,28 @@ const Editor = struct {
             var should_cancel = false;
             var should_submit = false;
             switch (key) {
-                .byte => |c| {
-                    if (c == '\x1b') {
-                        should_cancel = true;
-                    } else if (c == '\r') {
-                        continue;
-                    } else if (c == Terminal.ctrlKey('h') or c == 127) {
-                        _ = input.pop();
-                    } else if (!std.ascii.isControl(c) and c < 128) {
+                .byte => |c| switch (c) {
+                    '\x1b' => should_cancel = true,
+                    Terminal.ctrlKey('h'), 127 => _ = input.pop(),
+                    else => if (!std.ascii.isControl(c) and c < 128) {
                         try input.append(self.allocator, c);
-                    }
+                    },
                 },
-                .delete => {
-                    _ = input.pop();
-                },
-                .enter => {
-                    should_submit = true;
-                },
+                .delete => _ = input.pop(),
+                .enter => should_submit = true,
                 else => {},
             }
 
-            if (callback) |cb| {
-                try cb(self, input.items, key);
-            }
-
+            if (callback) |cb| try cb(self, input.items, key);
             if (should_cancel) {
                 try self.setStatusMessage("Save aborted");
                 return null;
             }
-
             if (should_submit and input.items.len != 0) {
                 try self.setStatusMessage("");
                 return try input.toOwnedSlice(self.allocator);
             }
         }
-    }
-
-    fn rowsToString(self: *Editor) ![]u8 {
-        var buf = std.ArrayList(u8).empty;
-        defer buf.deinit(self.allocator);
-
-        for (self.rows.items) |row| {
-            try buf.appendSlice(self.allocator, row.chars.items);
-            try buf.append(self.allocator, '\n');
-        }
-
-        return try buf.toOwnedSlice(self.allocator);
     }
 
     fn save(self: *Editor) !void {
@@ -647,18 +622,19 @@ const Editor = struct {
 
         const filename = self.filename.?;
 
-        const contents = try self.rowsToString();
-        defer self.allocator.free(contents);
-
-        const cwd = std.fs.cwd();
-        const file = try cwd.createFile(filename, .{ .truncate = true });
+        const file = try std.fs.cwd().createFile(filename, .{ .truncate = true });
         defer file.close();
 
-        try file.writeAll(contents);
+        var bytes: usize = 0;
+        for (self.rows.items) |row| {
+            try file.writeAll(row.chars.items);
+            try file.writeAll("\n");
+            bytes += row.chars.items.len + 1;
+        }
         self.dirty = false;
 
         var status_buf: [80]u8 = undefined;
-        const status = try std.fmt.bufPrint(&status_buf, "{d} bytes written to disk", .{contents.len});
+        const status = try std.fmt.bufPrint(&status_buf, "{d} bytes written to disk", .{bytes});
         try self.setStatusMessage(status);
     }
 
@@ -711,16 +687,12 @@ const Editor = struct {
     }
 
     fn find(self: *Editor) !void {
-        const saved_cx = self.cursor.x;
-        const saved_cy = self.cursor.y;
-        const saved_col_off = self.view.col_off;
-        const saved_row_off = self.view.row_off;
+        const saved_cursor = self.cursor;
+        const saved_view = self.view;
 
         const query = (try self.prompt("Search: {s} (ESC to cancel)", Editor.findCallback)) orelse {
-            self.cursor.x = saved_cx;
-            self.cursor.y = saved_cy;
-            self.view.col_off = saved_col_off;
-            self.view.row_off = saved_row_off;
+            self.cursor = saved_cursor;
+            self.view = saved_view;
             try self.setStatusMessage("");
             return;
         };
@@ -831,7 +803,7 @@ const Editor = struct {
                             if (current_color != null) {
                                 try ab.appendSlice(self.allocator, render_slice[span_start..i]);
                             }
-                            try ab.appendSlice(self.allocator, Editor.syntaxToColor(hl));
+                            try ab.appendSlice(self.allocator, hl.color());
                             current_color = hl;
                             span_start = i;
                         }
