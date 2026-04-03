@@ -384,6 +384,9 @@ const Editor = struct {
     }
 
     fn open(self: *Editor, filename: []const u8) !void {
+        if (self.filename) |old_filename| {
+            self.allocator.free(old_filename);
+        }
         self.filename = try self.allocator.dupe(u8, filename);
 
         const cwd = std.fs.cwd();
@@ -406,6 +409,44 @@ const Editor = struct {
         self.dirty = 0;
     }
 
+    fn prompt(self: *Editor, comptime fmt: []const u8) !?[]u8 {
+        var input = std.ArrayList(u8).empty;
+        defer input.deinit(self.allocator);
+
+        while (true) {
+            var prompt_buf: [256]u8 = undefined;
+            const prompt_text = try std.fmt.bufPrint(&prompt_buf, fmt, .{input.items});
+            try self.setStatusMessage(prompt_text);
+            try self.refreshScreen();
+
+            const key = (try editorReadKey()) orelse continue;
+            switch (key) {
+                .byte => |c| {
+                    if (c == '\x1b') {
+                        try self.setStatusMessage("Save aborted");
+                        return null;
+                    }
+                    if (c == '\r') continue;
+                    if (c == ctrlKey('h') or c == 127) {
+                        _ = input.pop();
+                    } else if (!std.ascii.isControl(c) and c < 128) {
+                        try input.append(self.allocator, c);
+                    }
+                },
+                .delete => {
+                    _ = input.pop();
+                },
+                .enter => {
+                    if (input.items.len != 0) {
+                        try self.setStatusMessage("");
+                        return try input.toOwnedSlice(self.allocator);
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+
     fn rowsToString(self: *Editor) ![]u8 {
         var buf = std.ArrayList(u8).empty;
         defer buf.deinit(self.allocator);
@@ -419,10 +460,12 @@ const Editor = struct {
     }
 
     fn save(self: *Editor) !void {
-        const filename = self.filename orelse {
-            try self.setStatusMessage("Save aborted: no filename");
-            return;
-        };
+        if (self.filename == null) {
+            const filename = (try self.prompt("Save as: {s} (ESC to cancel)")) orelse return;
+            self.filename = filename;
+        }
+
+        const filename = self.filename.?;
 
         const contents = try self.rowsToString();
         defer self.allocator.free(contents);
