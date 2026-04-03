@@ -1,5 +1,4 @@
 const std = @import("std");
-const kilo_zig = @import("kilo_zig");
 
 const KILO_ZIG_VERSION = "0.0.1";
 const KILO_TAB_STOP = 8;
@@ -1000,6 +999,4 @@ pub fn main() !void {
         };
         if (!should_continue) break;
     }
-
-    try kilo_zig.bufferedPrint();
 }
