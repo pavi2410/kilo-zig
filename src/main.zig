@@ -226,17 +226,47 @@ const Terminal = struct {
 };
 
 const EditorRow = struct {
-    chars: []u8,
+    chars: std.ArrayList(u8),
     render: []u8,
     hl: []EditorHighlight,
     hl_open_comment: bool,
 
+    fn deinit(self: *EditorRow, allocator: std.mem.Allocator) void {
+        self.chars.deinit(allocator);
+        allocator.free(self.render);
+        allocator.free(self.hl);
+    }
+
     fn len(self: EditorRow) usize {
-        return self.chars.len;
+        return self.chars.items.len;
     }
 
     fn renderLen(self: EditorRow) usize {
         return self.render.len;
+    }
+
+    fn cxToRx(self: EditorRow, cx: usize) usize {
+        var rx: usize = 0;
+        for (self.chars.items[0..@min(cx, self.len())]) |c| {
+            if (c == '\t') {
+                rx += (KILO_TAB_STOP - 1) - (rx % KILO_TAB_STOP);
+            }
+            rx += 1;
+        }
+        return rx;
+    }
+
+    fn rxToCx(self: EditorRow, rx: usize) usize {
+        var cur_rx: usize = 0;
+        var cx: usize = 0;
+        while (cx < self.len()) : (cx += 1) {
+            if (self.chars.items[cx] == '\t') {
+                cur_rx += (KILO_TAB_STOP - 1) - (cur_rx % KILO_TAB_STOP);
+            }
+            cur_rx += 1;
+            if (cur_rx > rx) return cx;
+        }
+        return cx;
     }
 };
 
@@ -291,10 +321,8 @@ const Editor = struct {
         if (self.search.saved_hl) |saved_hl| {
             self.allocator.free(saved_hl);
         }
-        for (self.rows.items) |row| {
-            self.allocator.free(row.chars);
-            self.allocator.free(row.render);
-            self.allocator.free(row.hl);
+        for (self.rows.items) |*row| {
+            row.deinit(self.allocator);
         }
         self.rows.deinit(self.allocator);
     }
@@ -336,34 +364,11 @@ const Editor = struct {
         }
     }
 
-    fn rowCxToRx(_: *const Editor, row: EditorRow, cx: usize) usize {
-        var rx: usize = 0;
-        for (row.chars[0..@min(cx, row.len())]) |c| {
-            if (c == '\t') {
-                rx += (KILO_TAB_STOP - 1) - (rx % KILO_TAB_STOP);
-            }
-            rx += 1;
-        }
-        return rx;
-    }
-
-    fn rowRxToCx(_: *const Editor, row: EditorRow, rx: usize) usize {
-        var cur_rx: usize = 0;
-        var cx: usize = 0;
-        while (cx < row.len()) : (cx += 1) {
-            if (row.chars[cx] == '\t') {
-                cur_rx += (KILO_TAB_STOP - 1) - (cur_rx % KILO_TAB_STOP);
-            }
-            cur_rx += 1;
-            if (cur_rx > rx) return cx;
-        }
-        return cx;
-    }
 
     fn updateRow(self: *Editor, row_index: usize) !void {
         const row = &self.rows.items[row_index];
         var tabs: usize = 0;
-        for (row.chars) |c| {
+        for (row.chars.items) |c| {
             if (c == '\t') tabs += 1;
         }
 
@@ -371,7 +376,7 @@ const Editor = struct {
         row.render = try self.allocator.alloc(u8, row.len() + tabs * (KILO_TAB_STOP - 1));
 
         var idx: usize = 0;
-        for (row.chars) |c| {
+        for (row.chars.items) |c| {
             if (c == '\t') {
                 row.render[idx] = ' ';
                 idx += 1;
@@ -502,8 +507,8 @@ const Editor = struct {
     }
 
     fn insertRow(self: *Editor, at: usize, line: []const u8) !void {
-        const chars = try self.allocator.alloc(u8, line.len);
-        @memcpy(chars, line);
+        var chars = std.ArrayList(u8).empty;
+        try chars.appendSlice(self.allocator, line);
         try self.rows.insert(self.allocator, at, .{
             .chars = chars,
             .render = try self.allocator.alloc(u8, 0),
@@ -516,26 +521,14 @@ const Editor = struct {
 
     fn rowInsertChar(self: *Editor, row_index: usize, at: usize, c: u8) !void {
         const row = &self.rows.items[row_index];
-        const insert_at = @min(at, row.len());
-        const new_chars = try self.allocator.alloc(u8, row.len() + 1);
-        @memcpy(new_chars[0..insert_at], row.chars[0..insert_at]);
-        new_chars[insert_at] = c;
-        @memcpy(new_chars[insert_at + 1 ..], row.chars[insert_at..]);
-
-        self.allocator.free(row.chars);
-        row.chars = new_chars;
+        try row.chars.insert(self.allocator, @min(at, row.len()), c);
         try self.updateRow(row_index);
         self.dirty = true;
     }
 
     fn rowAppendString(self: *Editor, row_index: usize, s: []const u8) !void {
         const row = &self.rows.items[row_index];
-        const new_chars = try self.allocator.alloc(u8, row.len() + s.len);
-        @memcpy(new_chars[0..row.len()], row.chars);
-        @memcpy(new_chars[row.len()..], s);
-
-        self.allocator.free(row.chars);
-        row.chars = new_chars;
+        try row.chars.appendSlice(self.allocator, s);
         try self.updateRow(row_index);
         self.dirty = true;
     }
@@ -543,22 +536,14 @@ const Editor = struct {
     fn rowDeleteChar(self: *Editor, row_index: usize, at: usize) !void {
         const row = &self.rows.items[row_index];
         if (row.len() == 0 or at >= row.len()) return;
-
-        const new_chars = try self.allocator.alloc(u8, row.len() - 1);
-        @memcpy(new_chars[0..at], row.chars[0..at]);
-        @memcpy(new_chars[at..], row.chars[at + 1 ..]);
-
-        self.allocator.free(row.chars);
-        row.chars = new_chars;
+        _ = row.chars.orderedRemove(at);
         try self.updateRow(row_index);
         self.dirty = true;
     }
 
     fn deleteRow(self: *Editor, at: usize) void {
-        const row = self.rows.orderedRemove(at);
-        self.allocator.free(row.chars);
-        self.allocator.free(row.render);
-        self.allocator.free(row.hl);
+        var row = self.rows.orderedRemove(at);
+        row.deinit(self.allocator);
         self.dirty = true;
     }
 
@@ -643,7 +628,7 @@ const Editor = struct {
         defer buf.deinit(self.allocator);
 
         for (self.rows.items) |row| {
-            try buf.appendSlice(self.allocator, row.chars);
+            try buf.appendSlice(self.allocator, row.chars.items);
             try buf.append(self.allocator, '\n');
         }
 
@@ -714,7 +699,7 @@ const Editor = struct {
             if (std.mem.indexOf(u8, row.render, query)) |match_index| {
                 self.search.last_match = row_index;
                 self.cursor.y = row_index;
-                self.cursor.x = self.rowRxToCx(row, match_index);
+                self.cursor.x = row.rxToCx(match_index);
                 self.view.row_off = self.rows.items.len;
                 self.view.col_off = 0;
                 self.search.saved_hl_line = row_index;
@@ -801,14 +786,10 @@ const Editor = struct {
         if (self.cursor.x == 0) {
             try self.insertRow(self.cursor.y, "");
         } else {
-            const row = self.rows.items[self.cursor.y];
-            try self.insertRow(self.cursor.y + 1, row.chars[self.cursor.x..]);
-
-            const new_chars = try self.allocator.alloc(u8, self.cursor.x);
-            @memcpy(new_chars, row.chars[0..self.cursor.x]);
-
-            self.allocator.free(self.rows.items[self.cursor.y].chars);
-            self.rows.items[self.cursor.y].chars = new_chars;
+            const split_at = self.cursor.x;
+            const tail = self.rows.items[self.cursor.y].chars.items[split_at..];
+            try self.insertRow(self.cursor.y + 1, tail);
+            self.rows.items[self.cursor.y].chars.shrinkRetainingCapacity(split_at);
             try self.updateRow(self.cursor.y);
             self.dirty = true;
         }
@@ -826,7 +807,7 @@ const Editor = struct {
             self.cursor.x -= 1;
         } else {
             const prev_row_len = self.rowLen(self.cursor.y - 1);
-            const current_chars = self.rows.items[self.cursor.y].chars;
+            const current_chars = self.rows.items[self.cursor.y].chars.items;
             try self.rowAppendString(self.cursor.y - 1, current_chars);
             self.deleteRow(self.cursor.y);
             self.cursor.y -= 1;
@@ -882,7 +863,7 @@ const Editor = struct {
     fn scroll(self: *Editor) void {
         self.cursor.rx = 0;
         if (self.cursor.y < self.rows.items.len) {
-            self.cursor.rx = self.rowCxToRx(self.rows.items[self.cursor.y], self.cursor.x);
+            self.cursor.rx = self.rows.items[self.cursor.y].cxToRx(self.cursor.x);
         }
 
         if (self.cursor.y < self.view.row_off) {
