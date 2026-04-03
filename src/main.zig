@@ -192,30 +192,11 @@ const Terminal = struct {
 
         if (buf[0] != '\x1b' or buf[1] != '[') return error.UnexpectedResponse;
 
-        var rows: usize = 0;
-        var cols: usize = 0;
-        var num_buf: [16]u8 = undefined;
-        var num_index: usize = 0;
-        for (buf[2..i]) |c| {
-            if (c == ';') {
-                rows = std.fmt.parseInt(usize, num_buf[0..num_index], 10) catch return error.UnexpectedResponse;
-                num_index = 0;
-            } else {
-                if (num_index < num_buf.len) {
-                    num_buf[num_index] = c;
-                    num_index += 1;
-                } else {
-                    return error.UnexpectedResponse;
-                }
-            }
-        }
-        if (num_index > 0) {
-            cols = std.fmt.parseInt(usize, num_buf[0..num_index], 10) catch return error.UnexpectedResponse;
-        } else {
-            return error.UnexpectedResponse;
-        }
+        var iter = std.mem.splitScalar(u8, buf[2..i], ';');
+        const rows = std.fmt.parseInt(u16, iter.next() orelse return error.UnexpectedResponse, 10) catch return error.UnexpectedResponse;
+        const cols = std.fmt.parseInt(u16, iter.next() orelse return error.UnexpectedResponse, 10) catch return error.UnexpectedResponse;
 
-        return .{ .row = @intCast(rows), .col = @intCast(cols), .xpixel = 0, .ypixel = 0 };
+        return .{ .row = rows, .col = cols, .xpixel = 0, .ypixel = 0 };
     }
 
     fn getWindowSize() !std.posix.winsize {
@@ -245,7 +226,7 @@ const Terminal = struct {
 };
 
 const EditorRow = struct {
-    chars: []const u8,
+    chars: []u8,
     render: []u8,
     hl: []EditorHighlight,
     hl_open_comment: bool,
@@ -431,7 +412,7 @@ const Editor = struct {
             const prev_hl: EditorHighlight = if (i > 0) row.hl[i - 1] else .normal;
 
             if (scs.len > 0 and in_string == 0 and !in_comment) {
-                if (i + scs.len <= row.renderLen() and std.mem.eql(u8, row.render[i .. i + scs.len], scs)) {
+                if (std.mem.startsWith(u8, row.render[i..], scs)) {
                     @memset(row.hl[i..], .comment);
                     break;
                 }
@@ -440,7 +421,7 @@ const Editor = struct {
             if (mcs.len > 0 and mce.len > 0 and in_string == 0) {
                 if (in_comment) {
                     row.hl[i] = .ml_comment;
-                    if (i + mce.len <= row.renderLen() and std.mem.eql(u8, row.render[i .. i + mce.len], mce)) {
+                    if (std.mem.startsWith(u8, row.render[i..], mce)) {
                         @memset(row.hl[i .. i + mce.len], .ml_comment);
                         i += mce.len;
                         in_comment = false;
@@ -450,7 +431,7 @@ const Editor = struct {
                         i += 1;
                         continue;
                     }
-                } else if (i + mcs.len <= row.renderLen() and std.mem.eql(u8, row.render[i .. i + mcs.len], mcs)) {
+                } else if (std.mem.startsWith(u8, row.render[i..], mcs)) {
                     @memset(row.hl[i .. i + mcs.len], .ml_comment);
                     i += mcs.len;
                     in_comment = true;
@@ -494,8 +475,7 @@ const Editor = struct {
                 for (syntax.keywords) |kw_raw| {
                     const is_kw2 = kw_raw.len > 0 and kw_raw[kw_raw.len - 1] == '|';
                     const kw = if (is_kw2) kw_raw[0 .. kw_raw.len - 1] else kw_raw;
-                    if (i + kw.len <= row.renderLen() and
-                        std.mem.eql(u8, row.render[i .. i + kw.len], kw) and
+                    if (std.mem.startsWith(u8, row.render[i..], kw) and
                         (i + kw.len == row.renderLen() or isSeparator(row.render[i + kw.len])))
                     {
                         @memset(row.hl[i .. i + kw.len], if (is_kw2) .keyword2 else .keyword1);
