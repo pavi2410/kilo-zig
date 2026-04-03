@@ -245,6 +245,8 @@ const Editor = struct {
     statusMessage: ?[]u8 = null,
     dirty: usize = 0,
     quitTimes: usize = KILO_QUIT_TIMES,
+    searchLastMatch: ?usize = null,
+    searchDirection: isize = 1,
     cx: usize = 0,
     cy: usize = 0,
     rx: usize = 0,
@@ -262,6 +264,8 @@ const Editor = struct {
             .statusMessage = null,
             .dirty = 0,
             .quitTimes = KILO_QUIT_TIMES,
+            .searchLastMatch = null,
+            .searchDirection = 1,
             .cx = 0,
             .cy = 0,
             .rx = 0,
@@ -422,7 +426,11 @@ const Editor = struct {
         self.dirty = 0;
     }
 
-    fn prompt(self: *Editor, comptime fmt: []const u8) !?[]u8 {
+    fn prompt(
+        self: *Editor,
+        comptime fmt: []const u8,
+        callback: ?*const fn (*Editor, []const u8, EditorKey) anyerror!void,
+    ) !?[]u8 {
         var input = std.ArrayList(u8).empty;
         defer input.deinit(self.allocator);
 
@@ -433,14 +441,15 @@ const Editor = struct {
             try self.refreshScreen();
 
             const key = (try editorReadKey()) orelse continue;
+            var should_cancel = false;
+            var should_submit = false;
             switch (key) {
                 .byte => |c| {
                     if (c == '\x1b') {
-                        try self.setStatusMessage("Save aborted");
-                        return null;
-                    }
-                    if (c == '\r') continue;
-                    if (c == ctrlKey('h') or c == 127) {
+                        should_cancel = true;
+                    } else if (c == '\r') {
+                        continue;
+                    } else if (c == ctrlKey('h') or c == 127) {
                         _ = input.pop();
                     } else if (!std.ascii.isControl(c) and c < 128) {
                         try input.append(self.allocator, c);
@@ -450,12 +459,23 @@ const Editor = struct {
                     _ = input.pop();
                 },
                 .enter => {
-                    if (input.items.len != 0) {
-                        try self.setStatusMessage("");
-                        return try input.toOwnedSlice(self.allocator);
-                    }
+                    should_submit = true;
                 },
                 else => {},
+            }
+
+            if (callback) |cb| {
+                try cb(self, input.items, key);
+            }
+
+            if (should_cancel) {
+                try self.setStatusMessage("Save aborted");
+                return null;
+            }
+
+            if (should_submit and input.items.len != 0) {
+                try self.setStatusMessage("");
+                return try input.toOwnedSlice(self.allocator);
             }
         }
     }
@@ -474,7 +494,7 @@ const Editor = struct {
 
     fn save(self: *Editor) !void {
         if (self.filename == null) {
-            const filename = (try self.prompt("Save as: {s} (ESC to cancel)")) orelse return;
+            const filename = (try self.prompt("Save as: {s} (ESC to cancel)", null)) orelse return;
             self.filename = filename;
         }
 
@@ -495,18 +515,69 @@ const Editor = struct {
         try self.setStatusMessage(status);
     }
 
-    fn find(self: *Editor) !void {
-        const query = (try self.prompt("Search: {s} (ESC to cancel)")) orelse return;
-        defer self.allocator.free(query);
+    fn findCallback(self: *Editor, query: []const u8, key: EditorKey) !void {
+        switch (key) {
+            .enter => {
+                self.searchLastMatch = null;
+                self.searchDirection = 1;
+                return;
+            },
+            .byte => |c| {
+                if (c == '\x1b') {
+                    self.searchLastMatch = null;
+                    self.searchDirection = 1;
+                    return;
+                }
+                self.searchLastMatch = null;
+                self.searchDirection = 1;
+            },
+            .arrow_right, .arrow_down => self.searchDirection = 1,
+            .arrow_left, .arrow_up => self.searchDirection = -1,
+            else => {
+                self.searchLastMatch = null;
+                self.searchDirection = 1;
+            },
+        }
 
-        for (self.rows.items, 0..) |row, i| {
+        if (query.len == 0) return;
+
+        var current: isize = if (self.searchLastMatch) |match| @intCast(match) else -1;
+
+        for (0..self.rows.items.len) |_| {
+            current += self.searchDirection;
+            if (current == -1) {
+                current = @intCast(self.rows.items.len - 1);
+            } else if (current == @as(isize, @intCast(self.rows.items.len))) {
+                current = 0;
+            }
+
+            const row_index: usize = @intCast(current);
+            const row = self.rows.items[row_index];
             if (std.mem.indexOf(u8, row.render, query)) |match_index| {
-                self.cy = i;
+                self.searchLastMatch = row_index;
+                self.cy = row_index;
                 self.cx = self.rowRxToCx(row, match_index);
                 self.rowOff = self.rows.items.len;
+                self.colOff = 0;
                 break;
             }
         }
+    }
+
+    fn find(self: *Editor) !void {
+        const saved_cx = self.cx;
+        const saved_cy = self.cy;
+        const saved_col_off = self.colOff;
+        const saved_row_off = self.rowOff;
+
+        const query = (try self.prompt("Search: {s} (ESC to cancel)", Editor.findCallback)) orelse {
+            self.cx = saved_cx;
+            self.cy = saved_cy;
+            self.colOff = saved_col_off;
+            self.rowOff = saved_row_off;
+            return;
+        };
+        defer self.allocator.free(query);
     }
 
     fn setStatusMessage(self: *Editor, message: []const u8) !void {
