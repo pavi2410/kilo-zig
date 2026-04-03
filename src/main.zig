@@ -259,6 +259,26 @@ const EditorRow = struct {
     }
 };
 
+const Cursor = struct {
+    x: usize = 0,
+    y: usize = 0,
+    rx: usize = 0,
+};
+
+const Viewport = struct {
+    row_off: usize = 0,
+    col_off: usize = 0,
+    rows: usize = 24,
+    cols: usize = 80,
+};
+
+const SearchState = struct {
+    last_match: ?usize = null,
+    direction: isize = 1,
+    saved_hl_line: ?usize = null,
+    saved_hl: ?[]EditorHighlight = null,
+};
+
 const Editor = struct {
     allocator: std.mem.Allocator,
     syntax: ?*const EditorSyntax = null,
@@ -266,25 +286,16 @@ const Editor = struct {
     statusMessage: ?[]u8 = null,
     dirty: bool = false,
     quitTimes: usize = KILO_QUIT_TIMES,
-    searchLastMatch: ?usize = null,
-    searchDirection: isize = 1,
-    savedHlLine: ?usize = null,
-    savedHl: ?[]EditorHighlight = null,
-    cx: usize = 0,
-    cy: usize = 0,
-    rx: usize = 0,
-    rowOff: usize = 0,
-    colOff: usize = 0,
-    screenRows: usize = 24,
-    screenCols: usize = 80,
+    cursor: Cursor = .{},
+    view: Viewport = .{},
+    search: SearchState = .{},
     rows: std.ArrayList(EditorRow),
 
     fn init(allocator: std.mem.Allocator) !Editor {
         const ws = try Terminal.getWindowSize();
         return .{
             .allocator = allocator,
-            .screenRows = ws.row - 2,
-            .screenCols = ws.col,
+            .view = .{ .rows = ws.row - 2, .cols = ws.col },
             .rows = .empty,
         };
     }
@@ -296,7 +307,7 @@ const Editor = struct {
         if (self.statusMessage) |status_message| {
             self.allocator.free(status_message);
         }
-        if (self.savedHl) |saved_hl| {
+        if (self.search.saved_hl) |saved_hl| {
             self.allocator.free(saved_hl);
         }
         for (self.rows.items) |row| {
@@ -687,31 +698,31 @@ const Editor = struct {
     }
 
     fn findCallback(self: *Editor, query: []const u8, key: EditorKey) !void {
-        if (self.savedHlLine) |saved_line| {
-            if (self.savedHl) |saved_hl| {
+        if (self.search.saved_hl_line) |saved_line| {
+            if (self.search.saved_hl) |saved_hl| {
                 @memcpy(self.rows.items[saved_line].hl, saved_hl);
                 self.allocator.free(saved_hl);
-                self.savedHl = null;
+                self.search.saved_hl = null;
             }
-            self.savedHlLine = null;
+            self.search.saved_hl_line = null;
         }
 
         switch (key) {
-            .arrow_right, .arrow_down => self.searchDirection = 1,
-            .arrow_left, .arrow_up => self.searchDirection = -1,
+            .arrow_right, .arrow_down => self.search.direction = 1,
+            .arrow_left, .arrow_up => self.search.direction = -1,
             else => {
-                self.searchLastMatch = null;
-                self.searchDirection = 1;
+                self.search.last_match = null;
+                self.search.direction = 1;
                 if (key == .enter or (key == .byte and key.byte == '\x1b')) return;
             },
         }
 
         if (query.len == 0) return;
 
-        var current: isize = if (self.searchLastMatch) |match| @intCast(match) else -1;
+        var current: isize = if (self.search.last_match) |match| @intCast(match) else -1;
 
         for (0..self.rows.items.len) |_| {
-            current += self.searchDirection;
+            current += self.search.direction;
             if (current == -1) {
                 current = @intCast(self.rows.items.len - 1);
             } else if (current == @as(isize, @intCast(self.rows.items.len))) {
@@ -721,13 +732,13 @@ const Editor = struct {
             const row_index: usize = @intCast(current);
             const row = self.rows.items[row_index];
             if (std.mem.indexOf(u8, row.render, query)) |match_index| {
-                self.searchLastMatch = row_index;
-                self.cy = row_index;
-                self.cx = self.rowRxToCx(row, match_index);
-                self.rowOff = self.rows.items.len;
-                self.colOff = 0;
-                self.savedHlLine = row_index;
-                self.savedHl = try self.allocator.dupe(EditorHighlight, self.rows.items[row_index].hl[match_index .. match_index + query.len]);
+                self.search.last_match = row_index;
+                self.cursor.y = row_index;
+                self.cursor.x = self.rowRxToCx(row, match_index);
+                self.view.row_off = self.rows.items.len;
+                self.view.col_off = 0;
+                self.search.saved_hl_line = row_index;
+                self.search.saved_hl = try self.allocator.dupe(EditorHighlight, self.rows.items[row_index].hl[match_index .. match_index + query.len]);
                 @memset(self.rows.items[row_index].hl[match_index .. match_index + query.len], .match);
                 break;
             }
@@ -735,16 +746,16 @@ const Editor = struct {
     }
 
     fn find(self: *Editor) !void {
-        const saved_cx = self.cx;
-        const saved_cy = self.cy;
-        const saved_col_off = self.colOff;
-        const saved_row_off = self.rowOff;
+        const saved_cx = self.cursor.x;
+        const saved_cy = self.cursor.y;
+        const saved_col_off = self.view.col_off;
+        const saved_row_off = self.view.row_off;
 
         const query = (try self.prompt("Search: {s} (ESC to cancel)", Editor.findCallback)) orelse {
-            self.cx = saved_cx;
-            self.cy = saved_cy;
-            self.colOff = saved_col_off;
-            self.rowOff = saved_row_off;
+            self.cursor.x = saved_cx;
+            self.cursor.y = saved_cy;
+            self.view.col_off = saved_col_off;
+            self.view.row_off = saved_row_off;
             try self.setStatusMessage("");
             return;
         };
@@ -771,13 +782,13 @@ const Editor = struct {
 
         var rstatus_buf: [80]u8 = undefined;
         const filetype = if (self.syntax) |syntax| syntax.filetype else "no ft";
-        const rstatus = try std.fmt.bufPrint(&rstatus_buf, "{s} | {d}/{d}", .{ filetype, self.cy + 1, self.rows.items.len });
+        const rstatus = try std.fmt.bufPrint(&rstatus_buf, "{s} | {d}/{d}", .{ filetype, self.cursor.y + 1, self.rows.items.len });
 
-        var len: usize = @min(status.len, self.screenCols);
+        var len: usize = @min(status.len, self.view.cols);
         try ab.appendSlice(self.allocator, status[0..len]);
 
-        while (len < self.screenCols) {
-            if (self.screenCols - len == rstatus.len) {
+        while (len < self.view.cols) {
+            if (self.view.cols - len == rstatus.len) {
                 try ab.appendSlice(self.allocator, rstatus);
                 break;
             }
@@ -792,66 +803,66 @@ const Editor = struct {
     fn drawMessageBar(self: *const Editor, ab: *std.ArrayList(u8)) !void {
         try ab.appendSlice(self.allocator, "\x1b[K");
         if (self.statusMessage) |status_message| {
-            const len = @min(status_message.len, self.screenCols);
+            const len = @min(status_message.len, self.view.cols);
             try ab.appendSlice(self.allocator, status_message[0..len]);
         }
     }
 
     fn insertChar(self: *Editor, c: u8) !void {
-        if (self.cy == self.rows.items.len) {
+        if (self.cursor.y == self.rows.items.len) {
             try self.appendRow("");
         }
 
-        try self.rowInsertChar(self.cy, self.cx, c);
-        self.cx += 1;
+        try self.rowInsertChar(self.cursor.y, self.cursor.x, c);
+        self.cursor.x += 1;
     }
 
     fn insertNewline(self: *Editor) !void {
-        if (self.cx == 0) {
-            try self.insertRow(self.cy, "");
+        if (self.cursor.x == 0) {
+            try self.insertRow(self.cursor.y, "");
         } else {
-            const row = self.rows.items[self.cy];
-            try self.insertRow(self.cy + 1, row.chars[self.cx..]);
+            const row = self.rows.items[self.cursor.y];
+            try self.insertRow(self.cursor.y + 1, row.chars[self.cursor.x..]);
 
-            const new_chars = try self.allocator.alloc(u8, self.cx);
-            @memcpy(new_chars, row.chars[0..self.cx]);
+            const new_chars = try self.allocator.alloc(u8, self.cursor.x);
+            @memcpy(new_chars, row.chars[0..self.cursor.x]);
 
-            self.allocator.free(self.rows.items[self.cy].chars);
-            self.rows.items[self.cy].chars = new_chars;
-            try self.updateRow(self.cy);
+            self.allocator.free(self.rows.items[self.cursor.y].chars);
+            self.rows.items[self.cursor.y].chars = new_chars;
+            try self.updateRow(self.cursor.y);
             self.dirty = true;
         }
 
-        self.cy += 1;
-        self.cx = 0;
+        self.cursor.y += 1;
+        self.cursor.x = 0;
     }
 
     fn deleteChar(self: *Editor) !void {
-        if (self.cy == self.rows.items.len) return;
-        if (self.cx == 0 and self.cy == 0) return;
+        if (self.cursor.y == self.rows.items.len) return;
+        if (self.cursor.x == 0 and self.cursor.y == 0) return;
 
-        if (self.cx > 0) {
-            try self.rowDeleteChar(self.cy, self.cx - 1);
-            self.cx -= 1;
+        if (self.cursor.x > 0) {
+            try self.rowDeleteChar(self.cursor.y, self.cursor.x - 1);
+            self.cursor.x -= 1;
         } else {
-            const prev_row_len = self.rowLen(self.cy - 1);
-            const current_chars = self.rows.items[self.cy].chars;
-            try self.rowAppendString(self.cy - 1, current_chars);
-            self.deleteRow(self.cy);
-            self.cy -= 1;
-            self.cx = prev_row_len;
+            const prev_row_len = self.rowLen(self.cursor.y - 1);
+            const current_chars = self.rows.items[self.cursor.y].chars;
+            try self.rowAppendString(self.cursor.y - 1, current_chars);
+            self.deleteRow(self.cursor.y);
+            self.cursor.y -= 1;
+            self.cursor.x = prev_row_len;
         }
     }
 
     fn drawRows(self: *const Editor, ab: *std.ArrayList(u8)) !void {
-        for (0..self.screenRows) |y| {
-            const fileRow = y + self.rowOff;
+        for (0..self.view.rows) |y| {
+            const fileRow = y + self.view.row_off;
             if (fileRow < self.rows.items.len) {
                 const row = self.rows.items[fileRow];
-                if (self.colOff < row.renderLen()) {
-                    const len = @min(row.renderLen() - self.colOff, self.screenCols);
-                    const render_slice = row.render[self.colOff .. self.colOff + len];
-                    const hl_slice = row.hl[self.colOff .. self.colOff + len];
+                if (self.view.col_off < row.renderLen()) {
+                    const len = @min(row.renderLen() - self.view.col_off, self.view.cols);
+                    const render_slice = row.render[self.view.col_off .. self.view.col_off + len];
+                    const hl_slice = row.hl[self.view.col_off .. self.view.col_off + len];
                     var current_color: ?EditorHighlight = null;
                     var span_start: usize = 0;
                     for (hl_slice, 0..) |hl, i| {
@@ -867,9 +878,9 @@ const Editor = struct {
                     try ab.appendSlice(self.allocator, render_slice[span_start..]);
                     try ab.appendSlice(self.allocator, "\x1b[39m");
                 }
-            } else if (self.rows.items.len == 0 and y == self.screenRows / 3) {
+            } else if (self.rows.items.len == 0 and y == self.view.rows / 3) {
                 const welcome = "Kilo Zig -- version " ++ KILO_ZIG_VERSION;
-                const padding = (self.screenCols - welcome.len) / 2;
+                const padding = (self.view.cols - welcome.len) / 2;
                 if (padding > 0) {
                     try ab.appendSlice(self.allocator, "~");
                     for (0..padding - 1) |_| {
@@ -882,32 +893,32 @@ const Editor = struct {
             }
 
             try ab.appendSlice(self.allocator, "\x1b[K");
-            if (y < self.screenRows - 1) {
+            if (y < self.view.rows - 1) {
                 try ab.appendSlice(self.allocator, "\r\n");
             }
         }
     }
 
     fn scroll(self: *Editor) void {
-        self.rx = 0;
-        if (self.cy < self.rows.items.len) {
-            self.rx = self.rowCxToRx(self.rows.items[self.cy], self.cx);
+        self.cursor.rx = 0;
+        if (self.cursor.y < self.rows.items.len) {
+            self.cursor.rx = self.rowCxToRx(self.rows.items[self.cursor.y], self.cursor.x);
         }
 
-        if (self.cy < self.rowOff) {
-            self.rowOff = self.cy;
+        if (self.cursor.y < self.view.row_off) {
+            self.view.row_off = self.cursor.y;
         }
 
-        if (self.cy >= self.rowOff + self.screenRows) {
-            self.rowOff = self.cy - self.screenRows + 1;
+        if (self.cursor.y >= self.view.row_off + self.view.rows) {
+            self.view.row_off = self.cursor.y - self.view.rows + 1;
         }
 
-        if (self.rx < self.colOff) {
-            self.colOff = self.rx;
+        if (self.cursor.rx < self.view.col_off) {
+            self.view.col_off = self.cursor.rx;
         }
 
-        if (self.rx >= self.colOff + self.screenCols) {
-            self.colOff = self.rx - self.screenCols + 1;
+        if (self.cursor.rx >= self.view.col_off + self.view.cols) {
+            self.view.col_off = self.cursor.rx - self.view.cols + 1;
         }
     }
 
@@ -927,7 +938,7 @@ const Editor = struct {
         try ab.appendSlice(self.allocator, "\r\n");
         try self.drawMessageBar(&ab);
 
-        try ab.writer(self.allocator).print("\x1b[{d};{d}H", .{ (self.cy - self.rowOff) + 1, (self.rx - self.colOff) + 1 });
+        try ab.writer(self.allocator).print("\x1b[{d};{d}H", .{ (self.cursor.y - self.view.row_off) + 1, (self.cursor.rx - self.view.col_off) + 1 });
         try ab.appendSlice(self.allocator, "\x1b[?25h");
         _ = try std.posix.write(std.posix.STDOUT_FILENO, ab.items);
     }
@@ -940,34 +951,34 @@ const Editor = struct {
     fn moveCursor(self: *Editor, key: EditorKey) void {
         switch (key) {
             .arrow_left => {
-                if (self.cx != 0) {
-                    self.cx -= 1;
-                } else if (self.cy > 0) {
-                    self.cy -= 1;
-                    self.cx = self.rowLen(self.cy);
+                if (self.cursor.x != 0) {
+                    self.cursor.x -= 1;
+                } else if (self.cursor.y > 0) {
+                    self.cursor.y -= 1;
+                    self.cursor.x = self.rowLen(self.cursor.y);
                 }
             },
             .arrow_right => {
-                const row_len = self.rowLen(self.cy);
-                if (self.cx < row_len) {
-                    self.cx += 1;
-                } else if (self.cy < self.rows.items.len) {
-                    self.cy += 1;
-                    self.cx = 0;
+                const row_len = self.rowLen(self.cursor.y);
+                if (self.cursor.x < row_len) {
+                    self.cursor.x += 1;
+                } else if (self.cursor.y < self.rows.items.len) {
+                    self.cursor.y += 1;
+                    self.cursor.x = 0;
                 }
             },
             .arrow_up => {
-                if (self.cy != 0) self.cy -= 1;
+                if (self.cursor.y != 0) self.cursor.y -= 1;
             },
             .arrow_down => {
-                if (self.cy < self.rows.items.len) self.cy += 1;
+                if (self.cursor.y < self.rows.items.len) self.cursor.y += 1;
             },
             else => {},
         }
 
-        const row_len = self.rowLen(self.cy);
-        if (self.cx > row_len) {
-            self.cx = row_len;
+        const row_len = self.rowLen(self.cursor.y);
+        if (self.cursor.x > row_len) {
+            self.cursor.x = row_len;
         }
     }
 
@@ -998,19 +1009,19 @@ const Editor = struct {
             .arrow_left, .arrow_right, .arrow_up, .arrow_down => self.moveCursor(key),
             .enter => try self.insertNewline(),
             .page_up => {
-                self.cy = self.rowOff;
-                for (0..self.screenRows) |_| {
+                self.cursor.y = self.view.row_off;
+                for (0..self.view.rows) |_| {
                     self.moveCursor(.arrow_up);
                 }
             },
             .page_down => {
-                self.cy = @min(self.rowOff + self.screenRows - 1, self.rows.items.len);
-                for (0..self.screenRows) |_| {
+                self.cursor.y = @min(self.view.row_off + self.view.rows - 1, self.rows.items.len);
+                for (0..self.view.rows) |_| {
                     self.moveCursor(.arrow_down);
                 }
             },
-            .home => self.cx = 0,
-            .end => self.cx = self.rowLen(self.cy),
+            .home => self.cursor.x = 0,
+            .end => self.cursor.x = self.rowLen(self.cursor.y),
             .delete => {
                 self.moveCursor(.arrow_right);
                 try self.deleteChar();
